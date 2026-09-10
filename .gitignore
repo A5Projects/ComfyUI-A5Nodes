@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.tmp
+*.log
+
+# Runtime content and local state. These files intentionally live beside the
+# relevant node source but must never be committed.
+**/a5prompt_database.json
+**/a5note_database.json
+**/clip_prompt_enhancer_config.json
+**/lmstudio_prompt_enhancer_config.json
+
+# Local environments, archives, and unrelated private projects.
+.venv/
+venv/
+*.zip
+*.7z
+local-lm-agent/
+local-lm-agent.*
