@@ -5,10 +5,12 @@ version = "0.1.0"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "A5" }]
+authors = [{ name = "A5Projects" }]
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/A5Projects/ComfyUI-A5Nodes"
+
 [tool.comfy]
-# Replace this placeholder with the immutable Comfy Registry publisher ID before publishing.
-PublisherId = "TODO"
+PublisherId = "A5Projects"
 DisplayName = "A5 Nodes"

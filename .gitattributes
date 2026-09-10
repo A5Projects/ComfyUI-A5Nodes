@@ -1,0 +1,19 @@
+* text=auto
+
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.comfyignore text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.webp binary

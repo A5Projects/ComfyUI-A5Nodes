@@ -1,0 +1,71 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.13"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile Python sources
+        run: python -m compileall -q .
+
+      - name: Run Python tests
+        run: python -m unittest discover -s tests -t . -p "test_*.py"
+
+  frontend-tests:
+    name: Frontend tests on Node.js 24
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Check frontend syntax
+        run: |
+          node --check web/a5_pad_image_for_outpaint.js
+          node --check web/a5_text_prompt.js
+          node --check web/a5note_database.js
+          node --check web/a5only_scale_to_total_pixels.js
+          node --check web/a5prompt_database.js
+          node --check web/a5scale_to_total_pixels_safe.js
+          node --check web/clip_prompt_enhancer.js
+          node --check web/lmstudio_prompt_enhancer.js
+
+      - name: Run frontend tests
+        run: |
+          node tests/test_a5_text_prompt_frontend.mjs
+          node tests/test_clip_prompt_history.mjs
+          node tests/test_lmstudio_prompt_history.mjs
