@@ -12,5 +12,5 @@ dependencies = []
 Repository = "https://github.com/A5Projects/ComfyUI-A5Nodes"
 
 [tool.comfy]
-PublisherId = "A5Projects"
-DisplayName = "A5 Nodes"
+PublisherId = "a5projects"
+DisplayName = "A5 Custom Nodes"
