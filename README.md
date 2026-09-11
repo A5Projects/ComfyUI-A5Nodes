@@ -12,9 +12,10 @@ versions remain compatible.
 Clone or extract this repository into `ComfyUI/custom_nodes`, then restart
 ComfyUI and refresh the browser. Disable any standalone copies of these nodes
 to avoid duplicate registrations.
-Now also on github and in ComfyUI manager (don't select Nightly version but the numbered one)
+Now also on github and in ComfyUI manager 
+## When installig via Comfy Manager, don't use the Nightly version, but select the numbered one
 
-## No additional Python packages are required. Detailed node documentation and screenshots below.
+### No additional Python packages are required. Detailed node documentation and screenshots below.
 
 <hr>
 
