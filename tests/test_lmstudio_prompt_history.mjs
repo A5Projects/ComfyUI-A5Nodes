@@ -49,6 +49,9 @@ source = source.replace(
   'import { app } from "../../scripts/app.js";',
   "const app = globalThis.__a5HistoryTestApp;",
 );
+source = source.replace('"./prompt_history_session.js"', JSON.stringify(
+  new URL("../web/prompt_history_session.js", import.meta.url).href,
+));
 source += `
 export {
   addPromptEditorButton,
@@ -61,6 +64,11 @@ export {
   setupCombinedModelManagementRow,
   setupPromptTextDividers,
   setupServerEjectRow,
+  openPromptEditor,
+  closePromptEditor,
+  promptEditors,
+  patchLastPromptWidget,
+  navigatePromptHistory,
 };
 `;
 
@@ -158,9 +166,21 @@ historyModule.markManualPrompt(node, "manual branch");
 historyModule.captureCurrentNodePrompt(node);
 assert.deepEqual(
   history.entries,
-  ["generated one", "manual branch"],
-  "manual edits after navigating backward truncate forward history",
+  ["generated one", "manual edit", "generated two", "manual branch"],
+  "manual edits after navigating backward preserve newer history",
 );
+history.index = 0;
+historyModule.recordGeneratedPrompt(node, "generated branch");
+assert.deepEqual(history.entries, [
+  "generated one", "manual edit", "generated two", "manual branch", "generated branch",
+], "generation from an older entry also preserves newer history");
+historyModule.recordGeneratedPrompt(node, "manual edit");
+assert.equal(history.entries.length, 5, "nonconsecutive generated duplicates reuse an entry");
+assert.equal(history.index, 1);
+promptWidget(node).value = "generated two";
+historyModule.captureCurrentNodePrompt(node);
+assert.equal(history.entries.length, 5, "nonconsecutive manual duplicates reuse an entry");
+assert.equal(history.index, 2);
 
 for (let index = 0; index < 25; index += 1) {
   historyModule.recordGeneratedPrompt(node, `generated rollover ${index}`);
@@ -200,6 +220,13 @@ assert.equal(
   "direct event shape",
   "execution supports both current Comfy event detail shapes",
 );
+historyModule.patchLastPromptWidget(executingNode);
+promptWidget(executingNode).value = "queued but cached";
+promptWidget(executingNode).beforeQueued();
+assert.equal(historyModule.getPromptHistory(executingNode).entries.at(-1), "queued but cached",
+  "queueing captures edits even without an executing event");
+promptWidget(executingNode).beforeQueued();
+assert.equal(historyModule.getPromptHistory(executingNode).entries.length, 4);
 
 function makeCanvasContext() {
   const fills = [];
@@ -609,5 +636,79 @@ for (const widget of textWidgets) {
 }
 assert.deepEqual(dividerNode.size, [500, 1000], "Nodes 2.0 resize passes through unchanged");
 globalThis.LiteGraph.vueNodesMode = false;
+
+class EditorElement extends FakeTextElement {
+  constructor() {
+    super("");
+    this.style = {};
+    this.children = [];
+    this.classList = { toggle() {} };
+  }
+  setAttribute() {}
+  append(...children) { this.children.push(...children); }
+  focus() {}
+  remove() { this.removed = true; }
+}
+document.createElement = () => new EditorElement();
+document.body = { appendChild() {} };
+window.innerWidth = 1280;
+window.innerHeight = 900;
+
+class SessionNode {
+  constructor(id, value, workflow = "workflow-A") {
+    Object.assign(this, makeNode(id, value));
+    this.graph = { id: workflow };
+  }
+}
+await extension.beforeRegisterNodeDef(SessionNode, { name: "A5lmstudio_prompt_enhancer" });
+const editorNode = new SessionNode(20, "A");
+historyModule.patchLastPromptWidget(editorNode);
+editorNode.onConfigure({});
+historyModule.openPromptEditor(editorNode);
+let editor = historyModule.promptEditors.get(editorNode);
+const editorHistory = historyModule.getPromptHistory(editorNode);
+editor.textarea.value = "B";
+editor.textarea.dispatch("input");
+editor.panel.dispatch("pointerdown");
+assert.deepEqual(editorHistory.entries, ["A"], "clicking inside the editor does not save a draft");
+editor.textarea.dispatch("blur");
+assert.deepEqual(editorHistory.entries, ["A", "B"], "leaving the editor commits once");
+editor.textarea.value = "C";
+editor.textarea.dispatch("input");
+historyModule.closePromptEditor(editorNode);
+assert.deepEqual(editorHistory.entries, ["A", "B", "C"], "closing commits the final draft");
+historyModule.openPromptEditor(editorNode);
+editor = historyModule.promptEditors.get(editorNode);
+assert.deepEqual(editorHistory.entries, ["A", "B", "C"], "reopening preserves history");
+historyModule.navigatePromptHistory(editorNode, -1);
+promptWidget(editorNode).beforeQueued();
+assert.deepEqual(editorHistory.entries, ["A", "B", "C"], "running B keeps C without duplicating B");
+editor.textarea.value = "D";
+editor.textarea.dispatch("input");
+promptWidget(editorNode).beforeQueued();
+editor.textarea.dispatch("blur");
+assert.deepEqual(editorHistory.entries, ["A", "B", "C", "D"], "run and blur commit one draft once");
+historyModule.closePromptEditor(editorNode);
+app.graph._nodes.push(editorNode);
+listeners.get("a5lmstudio_prompt_enhancer.prompt_updated")({ detail: { node_id: 20, prompt: "E" } });
+assert.deepEqual(editorHistory.entries, ["A", "B", "C", "D", "E"], "closed editor records LLM output");
+listeners.get("a5lmstudio_prompt_enhancer.prompt_updated")({ detail: { node_id: 20, prompt: "B" } });
+assert.equal(editorHistory.index, 1);
+assert.equal(editorHistory.entries.length, 5, "repeated generation selects the existing entry");
+editorNode.onConfigure({});
+assert.equal(editorHistory.entries.length, 5, "reconfiguration does not clear history");
+editorNode.onRemoved();
+const workflowBNode = new SessionNode(20, "different workflow", "workflow-B");
+workflowBNode.onConfigure({});
+assert.deepEqual(historyModule.getPromptHistory(workflowBNode).entries, ["different workflow"]);
+const restoredNode = new SessionNode(20, "B");
+restoredNode.onConfigure({});
+const restoredHistory = historyModule.getPromptHistory(restoredNode);
+assert.deepEqual(restoredHistory.entries, ["A", "B", "C", "D", "E"], "tab switching restores the full session list");
+assert.equal(restoredHistory.index, 1, "tab switching restores the selected older entry");
+const isolatedNode = new SessionNode(21, "separate node");
+isolatedNode.onConfigure({});
+assert.deepEqual(historyModule.getPromptHistory(isolatedNode).entries, ["separate node"]);
+for (const timer of executingNode.__a5PromptEditorBindTimers ?? []) clearTimeout(timer);
 
 console.log("LM Studio prompt history tests passed");

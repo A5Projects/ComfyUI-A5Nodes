@@ -99,6 +99,9 @@ source = source.replace(
     'import { app } from "../../scripts/app.js";',
     "const app = globalThis.__a5TestApp;",
 );
+source = source.replace('"./prompt_history_session.js"', JSON.stringify(
+    new URL("../web/prompt_history_session.js", import.meta.url).href,
+));
 await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 
 assert.ok(extension, "frontend extension registered");
@@ -200,9 +203,15 @@ clickToolbar(first, "previous");
 clickToolbar(first, "previous");
 assert.equal(textWidget(first).value, "rollover 19", "previous navigation applies stored text");
 editAndBlur(first, "branched prompt");
-assert.equal(position(first), "19/19", "editing after navigation truncates forward history");
+assert.equal(position(first), "20/20", "editing after navigation retains newer entries up to the limit");
 clickToolbar(first, "next");
 assert.equal(textWidget(first).value, "branched prompt", "next is disabled at branch end");
+clickToolbar(first, "previous");
+assert.equal(textWidget(first).value, "rollover 21", "newer history survives editing an older prompt");
+textWidget(first).beforeQueued();
+assert.equal(position(first), "19/20", "running an old entry does not duplicate it");
+editAndBlur(first, "rollover 19");
+assert.equal(position(first), "17/20", "nonconsecutive duplicate selects its original position");
 
 eventListeners.get("a5_text_prompt.text_updated")({
     detail: { node_id: "1", text: "" },
@@ -228,7 +237,39 @@ assert.equal(textWidget(second).value, "separate");
 editAndBlur(second, "second edit");
 assert.equal(position(second), "2/2");
 second.configure?.({});
-assert.equal(position(second), "1/1", "workflow configure resets session history");
+assert.equal(position(second), "2/2", "reconfiguring a live node preserves session history");
+second.textInput.value = "queued edit";
+second.textInput.dispatch("input");
+assert.equal(position(second), "2/2", "typing is not committed until blur or run");
+textWidget(second).beforeQueued();
+assert.equal(position(second), "3/3", "queue hook saves edits even when execution is cached");
+
+const workflowA = { id: "workflow-A" };
+second.graph = workflowA;
+editAndBlur(second, "workflow A saved");
+second.onRemoved();
+const otherWorkflow = new FakeNode(2, "workflow B text");
+otherWorkflow.graph = { id: "workflow-B" };
+otherWorkflow.configure({});
+assert.equal(position(otherWorkflow), "1/1", "same node ID in another workflow is isolated");
+const returned = new FakeNode(2, "workflow A saved");
+returned.graph = { id: "workflow-A" };
+returned.configure({});
+assert.equal(position(returned), "4/4", "workflow-tab return restores history to a recreated node");
+clickToolbar(returned, "previous");
+assert.equal(textWidget(returned).value, "queued edit");
+const subgraphNode = new FakeNode(2, "subgraph text");
+subgraphNode.graph = { id: "subgraph", rootGraph: workflowA };
+subgraphNode.configure({});
+assert.equal(position(subgraphNode), "1/1", "subgraph node IDs do not collide with root nodes");
+editAndBlur(subgraphNode, "subgraph edit");
+const otherSubgraph = new FakeNode(2, "other workflow subgraph");
+otherSubgraph.graph = { id: "subgraph", rootGraph: { id: "workflow-B" } };
+otherSubgraph.configure({});
+assert.equal(position(otherSubgraph), "1/1", "subgraph history is scoped to its root workflow");
+for (const item of [first, second, otherWorkflow, returned, subgraphNode, otherSubgraph]) {
+    item.onRemoved();
+}
 
 assert.equal(
     first.widgets.filter((widget) => widget.name === "text").length,

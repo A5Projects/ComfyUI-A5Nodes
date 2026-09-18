@@ -29,6 +29,9 @@ source = source.replace(
   'import { app } from "../../scripts/app.js";',
   "const app = globalThis.__a5ClipHistoryTestApp;",
 );
+source = source.replace('"./prompt_history_session.js"', JSON.stringify(
+  new URL("../web/prompt_history_session.js", import.meta.url).href,
+));
 source += `
 export {
   bindLastPromptWidgetBlur,
@@ -38,6 +41,11 @@ export {
   recordGeneratedPrompt,
   restoreNamedWidgetValues,
   setupPromptTextDividers,
+  openPromptEditor,
+  closePromptEditor,
+  promptEditors,
+  patchLastPromptWidget,
+  navigatePromptHistory,
 };
 `;
 const historyModule = await import(
@@ -115,9 +123,21 @@ historyModule.markManualPrompt(node, "manual branch");
 historyModule.captureCurrentNodePrompt(node);
 assert.deepEqual(
   history.entries,
-  ["generated one", "manual branch"],
-  "manual edits after navigating backward truncate forward history",
+  ["generated one", "manual edit", "generated two", "manual branch"],
+  "manual edits after navigating backward preserve newer history",
 );
+history.index = 0;
+historyModule.recordGeneratedPrompt(node, "generated branch");
+assert.deepEqual(history.entries, [
+  "generated one", "manual edit", "generated two", "manual branch", "generated branch",
+], "generation from an older entry preserves newer history");
+historyModule.recordGeneratedPrompt(node, "manual edit");
+assert.equal(history.entries.length, 5, "duplicate generation reuses the original entry");
+assert.equal(history.index, 1);
+node.widgets[0].value = "generated two";
+historyModule.captureCurrentNodePrompt(node);
+assert.equal(history.entries.length, 5, "duplicate manual text reuses the original entry");
+assert.equal(history.index, 2);
 
 for (let index = 0; index < 25; index += 1) {
   historyModule.recordGeneratedPrompt(node, `generated rollover ${index}`);
@@ -303,5 +323,82 @@ for (const widget of textWidgets) {
 }
 assert.deepEqual(dividerNode.size, [500, 1000], "Nodes 2.0 resize passes through unchanged");
 globalThis.LiteGraph.vueNodesMode = false;
+
+class EditorElement extends FakeTextElement {
+  constructor() {
+    super("");
+    this.style = {};
+    this.children = [];
+    this.classList = { toggle() {} };
+  }
+  setAttribute() {}
+  append(...children) { this.children.push(...children); }
+  focus() {}
+  remove() {}
+}
+globalThis.document = {
+  createElement: () => new EditorElement(),
+  getElementById: () => null,
+  head: { appendChild() {} },
+  body: { appendChild() {} },
+};
+globalThis.window = { innerWidth: 1280, innerHeight: 900 };
+class SessionNode {
+  constructor(id, prompt, graph = { id: "workflow-A" }) {
+    Object.assign(this, makeNode(id, prompt));
+    this.graph = graph;
+  }
+}
+await extension.beforeRegisterNodeDef(SessionNode, { name: "A5ClipPromptEnhancer" });
+const editorNode = new SessionNode(20, "A");
+historyModule.patchLastPromptWidget(editorNode);
+editorNode.onConfigure({});
+historyModule.openPromptEditor(editorNode);
+let editor = historyModule.promptEditors.get(editorNode);
+const editorHistory = historyModule.getPromptHistory(editorNode);
+editor.textarea.value = "B";
+editor.textarea.dispatch("input");
+editor.panel.dispatch("pointerdown");
+assert.deepEqual(editorHistory.entries, ["A"], "typing and clicking within the editor do not commit");
+editor.textarea.dispatch("blur");
+assert.deepEqual(editorHistory.entries, ["A", "B"], "blur commits the draft");
+editor.textarea.value = "C";
+editor.textarea.dispatch("input");
+historyModule.closePromptEditor(editorNode);
+assert.deepEqual(editorHistory.entries, ["A", "B", "C"], "closing commits the draft");
+historyModule.openPromptEditor(editorNode);
+editor = historyModule.promptEditors.get(editorNode);
+historyModule.navigatePromptHistory(editorNode, -1);
+editorNode.widgets[0].beforeQueued();
+assert.deepEqual(editorHistory.entries, ["A", "B", "C"], "queueing B preserves C without duplicates");
+editor.textarea.value = "D";
+editor.textarea.dispatch("input");
+editorNode.widgets[0].beforeQueued();
+editor.textarea.dispatch("blur");
+assert.deepEqual(editorHistory.entries, ["A", "B", "C", "D"], "queueing captures drafts even on cached runs");
+historyModule.closePromptEditor(editorNode);
+app.graph._nodes.push(editorNode);
+listeners.get("a5clip_prompt_enhancer.prompt_updated")({ detail: { node_id: 20, prompt: "E" } });
+assert.deepEqual(editorHistory.entries, ["A", "B", "C", "D", "E"], "generation is recorded while the editor is closed");
+listeners.get("a5clip_prompt_enhancer.prompt_updated")({ detail: { node_id: 20, prompt: "B" } });
+assert.equal(editorHistory.index, 1);
+assert.equal(editorHistory.entries.length, 5);
+editorNode.onConfigure({});
+assert.equal(editorHistory.entries.length, 5, "reconfiguration keeps history");
+editorNode.onRemoved();
+const otherWorkflow = new SessionNode(20, "other", { id: "workflow-B" });
+otherWorkflow.onConfigure({});
+assert.deepEqual(historyModule.getPromptHistory(otherWorkflow).entries, ["other"]);
+const restored = new SessionNode(20, "B");
+restored.onConfigure({});
+assert.deepEqual(historyModule.getPromptHistory(restored).entries, ["A", "B", "C", "D", "E"],
+  "returning to a workflow restores its history to the recreated node");
+assert.equal(historyModule.getPromptHistory(restored).index, 1);
+const separateNode = new SessionNode(21, "separate");
+separateNode.onConfigure({});
+assert.deepEqual(historyModule.getPromptHistory(separateNode).entries, ["separate"]);
+const subgraphNode = new SessionNode(20, "subgraph", { id: "subgraph", rootGraph: { id: "workflow-A" } });
+subgraphNode.onConfigure({});
+assert.deepEqual(historyModule.getPromptHistory(subgraphNode).entries, ["subgraph"]);
 
 console.log("A5 CLIP prompt history tests passed");

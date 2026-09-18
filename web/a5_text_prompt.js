@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { createPromptHistorySession } from "./prompt_history_session.js";
 
 const NODE_NAME = "A5TextPrompt";
 const TEXT_UPDATE_EVENT = "a5_text_prompt.text_updated";
@@ -7,6 +8,7 @@ const TOOLBAR_NAME = "a5_text_prompt_history";
 const TOOLBAR_HEIGHT = 34;
 
 const histories = new WeakMap();
+const historySession = createPromptHistorySession();
 
 function textWidget(node) {
     return node.widgets?.find((widget) => widget.name === "text");
@@ -28,10 +30,9 @@ function newState(node) {
         index: 0,
         dirty: false,
         applying: false,
+        initialized: false,
         boundElements: new WeakSet(),
-        boundElementCount: 0,
         bindTimers: [],
-        fallbackTimer: null,
     };
 }
 
@@ -44,15 +45,14 @@ function historyState(node) {
     return state;
 }
 
-function resetHistory(node) {
-    const previous = histories.get(node);
+function restoreHistory(node) {
     clearNodeTimers(node);
-    const state = newState(node);
-    if (previous) {
-        state.boundElements = previous.boundElements;
-        state.boundElementCount = previous.boundElementCount;
+    const state = historyState(node);
+    if (!historySession.restore(node, state, widgetText(node)) && !state.initialized) {
+        state.entries = [widgetText(node)];
+        state.index = 0;
     }
-    histories.set(node, state);
+    state.initialized = true;
     bindTextEditor(node);
     scheduleEditorBinding(node);
     syncHistoryToolbar(node);
@@ -74,18 +74,20 @@ function commitValue(node, value, { allowEmpty = false } = {}) {
     }
 
     const prompt = String(value ?? "");
+    state.initialized = true;
     if (!allowEmpty && !prompt && state.entries.length === 0) {
         state.dirty = false;
         return false;
     }
 
-    if (state.index >= 0 && state.entries[state.index] === prompt) {
+    const existingIndex = state.entries.indexOf(prompt);
+    if (existingIndex >= 0) {
+        state.index = existingIndex;
         state.dirty = false;
+        historySession.save(node, state);
+        syncHistoryToolbar(node);
+        dirtyCanvas(node);
         return false;
-    }
-
-    if (state.index < state.entries.length - 1) {
-        state.entries.splice(state.index + 1);
     }
 
     state.entries.push(prompt);
@@ -94,6 +96,7 @@ function commitValue(node, value, { allowEmpty = false } = {}) {
     }
     state.index = state.entries.length - 1;
     state.dirty = false;
+    historySession.save(node, state);
     syncHistoryToolbar(node);
     dirtyCanvas(node);
     return true;
@@ -141,6 +144,7 @@ function navigateHistory(node, direction) {
     }
     state.index = target;
     state.dirty = false;
+    historySession.save(node, state);
     applyText(node, state.entries[target]);
     syncHistoryToolbar(node);
 }
@@ -410,7 +414,6 @@ function bindTextEditor(node) {
             continue;
         }
         state.boundElements.add(element);
-        state.boundElementCount += 1;
         element.addEventListener("input", () => {
             syncElementValue(widget, element);
             markTextDirty(node);
@@ -432,16 +435,18 @@ function patchTextWidget(node) {
         return;
     }
     widget.__a5TextPromptPatched = true;
+    const beforeQueued = widget.beforeQueued;
+    widget.beforeQueued = function (...args) {
+        const result = beforeQueued?.apply(this, args);
+        commitCurrentText(node);
+        return result;
+    };
     const originalCallback = widget.callback;
     widget.callback = function callback(value, ...args) {
         const result = originalCallback?.call(this, value, ...args);
         const state = historyState(node);
         if (!state.applying) {
             markTextDirty(node);
-            if (state.boundElementCount === 0) {
-                clearTimeout(state.fallbackTimer);
-                state.fallbackTimer = setTimeout(() => commitCurrentText(node), 0);
-            }
         }
         return result;
     };
@@ -462,8 +467,6 @@ function clearNodeTimers(node) {
     }
     state.bindTimers.forEach((timer) => clearTimeout(timer));
     state.bindTimers.length = 0;
-    clearTimeout(state.fallbackTimer);
-    state.fallbackTimer = null;
 }
 
 function setupNode(node) {
@@ -501,7 +504,7 @@ app.registerExtension({
         const originalConfigure = nodeType.prototype.configure;
         nodeType.prototype.configure = function configure(...args) {
             const result = originalConfigure?.apply(this, args);
-            resetHistory(this);
+            restoreHistory(this);
             setupNode(this);
             growNodeForToolbar(this);
             return result;
@@ -534,7 +537,7 @@ app.registerExtension({
         });
 
         app.api?.addEventListener("executing", (event) => {
-            const node = findNode(event.detail);
+            const node = findNode(event.detail?.node ?? event.detail);
             if (node) {
                 commitCurrentText(node);
             }

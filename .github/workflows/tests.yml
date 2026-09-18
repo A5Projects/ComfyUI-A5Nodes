@@ -68,6 +68,7 @@ jobs:
           node --check web/a5scale_to_total_pixels_safe.js
           node --check web/clip_prompt_enhancer.js
           node --check web/lmstudio_prompt_enhancer.js
+          node --check web/prompt_history_session.js
 
       - name: Run frontend tests
         run: |

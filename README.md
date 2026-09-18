@@ -145,3 +145,18 @@ This is WiP i'm not happy with the display of the notes yet. The database and st
 
 ![image](https://cdn-uploads.huggingface.co/production/uploads/67786db89328893864293f2c/FYUtuQjsU6gUMe2CGNGwE.png)
 
+## Prompt History
+
+A5TextPrompt and the LM Studio and CLIP prompt enhancers keep up to 20 distinct prompts
+per node. Manual edits are captured when you leave the text field, close the
+popout editor, or queue a workflow run. History navigation and export also
+capture any pending edit. New generated or incoming prompts are saved automatically.
+Reusing an older prompt selects its existing entry; editing it adds a new one
+without discarding newer entries. Only exceeding the 20-entry limit removes
+the oldest prompt.
+
+History survives editor closing, node reconfiguration, and switching workflow
+tabs within the same page session. It is kept in memory, scoped to ComfyUI's
+workflow/subgraph/node IDs, and is not written to workflow files or local config.
+A browser refresh or restart clears it. Workflows with distinct IDs have
+separate histories; copies that preserve all those IDs share that session history.

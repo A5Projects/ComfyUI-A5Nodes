@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { createPromptHistorySession } from "./prompt_history_session.js";
 
 const NODE_CLASS = "A5ClipPromptEnhancer";
 const RUN_MODE_BYPASS = "Bypass - send last/manual prompt";
@@ -10,6 +11,7 @@ const PROMPT_DIVIDER_HEIGHT = 8;
 const PROMPT_EDITOR_STYLE_ID = "a5clip-prompt-editor-styles";
 const promptEditors = new WeakMap();
 const promptHistories = new WeakMap();
+const promptHistorySession = createPromptHistorySession();
 const promptTextLayouts = new WeakMap();
 let promptEditorZIndex = 10000;
 
@@ -213,6 +215,7 @@ function getPromptHistory(node) {
     index: currentPrompt ? 0 : -1,
     applying: false,
     dirty: false,
+    initialized: false,
   };
   promptHistories.set(node, history);
   return history;
@@ -251,21 +254,23 @@ function commitManualPrompt(node, value) {
   }
 
   const prompt = promptValue(value);
-  if (history.index >= 0 && history.entries[history.index] === prompt) {
+  history.initialized = true;
+  const existingIndex = history.entries.indexOf(prompt);
+  if (existingIndex >= 0) {
+    history.index = existingIndex;
     history.dirty = false;
+    promptHistorySession.save(node, history);
     syncPromptHistoryControls(node);
     return false;
   }
 
-  if (history.index < history.entries.length - 1) {
-    history.entries = history.entries.slice(0, history.index + 1);
-  }
   history.entries.push(prompt);
   if (history.entries.length > PROMPT_HISTORY_LIMIT) {
     history.entries.splice(0, history.entries.length - PROMPT_HISTORY_LIMIT);
   }
   history.index = history.entries.length - 1;
   history.dirty = false;
+  promptHistorySession.save(node, history);
   syncPromptHistoryControls(node);
   return true;
 }
@@ -285,21 +290,7 @@ function captureCurrentNodePrompt(node) {
 }
 
 function recordGeneratedPrompt(node, value) {
-  const history = getPromptHistory(node);
-  const prompt = promptValue(value);
-
-  if (history.index < history.entries.length - 1) {
-    history.entries = history.entries.slice(0, history.index + 1);
-  }
-  if (history.entries[history.entries.length - 1] !== prompt) {
-    history.entries.push(prompt);
-    if (history.entries.length > PROMPT_HISTORY_LIMIT) {
-      history.entries.splice(0, history.entries.length - PROMPT_HISTORY_LIMIT);
-    }
-  }
-  history.index = history.entries.length - 1;
-  history.dirty = false;
-  syncPromptHistoryControls(node);
+  commitManualPrompt(node, value);
 }
 
 function syncPromptEditor(node, value) {
@@ -339,6 +330,7 @@ function navigatePromptHistory(node, direction) {
     return;
   }
   history.index = nextIndex;
+  promptHistorySession.save(node, history);
   setLastPromptValue(node, history.entries[nextIndex], { recordManual: false });
 }
 
@@ -551,7 +543,6 @@ function openPromptEditor(node) {
   syncPromptEditorMode(node);
 
   panel.addEventListener("pointerdown", () => {
-    captureCurrentNodePrompt(node);
     bringPromptEditorToFront(editor);
   });
   panel.addEventListener("keydown", (event) => {
@@ -614,6 +605,12 @@ function patchLastPromptWidget(node) {
   }
 
   widget.__a5PromptEditorPatched = true;
+  const beforeQueued = widget.beforeQueued;
+  widget.beforeQueued = function (...args) {
+    const result = beforeQueued?.apply(this, args);
+    captureCurrentNodePrompt(node);
+    return result;
+  };
   const callback = widget.callback;
   widget.callback = function (value) {
     const result = callback?.call(this, value);
@@ -975,7 +972,17 @@ app.registerExtension({
     const onConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function (info) {
       restoreNamedWidgetValues(this, info);
-      return onConfigure?.apply(this, arguments);
+      const result = onConfigure?.apply(this, arguments);
+      const history = getPromptHistory(this);
+      const prompt = promptValue(findWidget(this, "last_generated_prompt")?.value);
+      if (!promptHistorySession.restore(this, history, prompt) && !history.initialized) {
+        history.entries = prompt ? [prompt] : [];
+        history.index = history.entries.length - 1;
+      }
+      history.initialized = true;
+      syncPromptHistoryControls(this);
+      syncPromptEditor(this, prompt);
+      return result;
     };
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
