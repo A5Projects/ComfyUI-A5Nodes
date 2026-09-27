@@ -1,12 +1,14 @@
 import re
 
 import torch
+import comfy.model_management
 
 from .scale_core import (
     common_required_inputs,
     ensure_bhwc,
     resize_bhwc,
     resolve_dimensions,
+    resolve_blank_dimensions,
     result_with_size,
 )
 
@@ -115,9 +117,16 @@ class A5PadScaleToTotalPixels:
     single padding strip on the selected side.
     """
 
+    DESCRIPTION = (
+        "Resize or pad an image, or generate a solid-color canvas without an "
+        "image using an aspect preset or manual dimensions. Always outputs an "
+        "empty latent; its dimensions round up independently to multiples of 8."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         required = common_required_inputs()
+        required.pop("image")
         required.update(
             {
                 "aspect_handling": (
@@ -134,16 +143,35 @@ class A5PadScaleToTotalPixels:
                 ),
             }
         )
-        return {"required": required}
+        return {
+            "required": required,
+            "optional": {
+                "image": (
+                    "IMAGE",
+                    {
+                        "tooltip": "Optional. Without an image, an aspect preset or "
+                        "manual dimension creates a canvas filled with padding_color.",
+                    },
+                ),
+            },
+        }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING")
-    RETURN_NAMES = ("image", "width", "height", "size_text")
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING", "LATENT")
+    RETURN_NAMES = ("image", "width", "height", "size_text", "latent")
+    OUTPUT_TOOLTIPS = (
+        "Resized/padded image, or a solid-color canvas when no image is supplied.",
+        "Actual output image width in pixels.",
+        "Actual output image height in pixels.",
+        "Actual output image dimensions.",
+        "Empty latent, never an image encoding. Each dimension rounds up to a "
+        "multiple of 8 independently of the image. The sampler may adapt it "
+        "further for the model.",
+    )
     FUNCTION = "execute"
     CATEGORY = "A5/image/transform"
 
     def execute(
         self,
-        image,
         target_total_pixels,
         dimension_rule,
         aspect_ratio,
@@ -155,7 +183,17 @@ class A5PadScaleToTotalPixels:
         aspect_handling,
         padding_side,
         padding_color,
+        image=None,
     ):
+        if image is None:
+            width, height = resolve_blank_dimensions(
+                target_total_pixels, dimension_rule, aspect_ratio,
+                width_override, height_override,
+            )
+            color = torch.tensor(parse_hex_color(padding_color), dtype=torch.float32)
+            output = color.view(1, 1, 1, 3).expand(1, height, width, 3).clone()
+            return self.result_with_latent(output, width, height, blank=True)
+
         image = ensure_bhwc(image)
         _, source_height, source_width, _ = image.shape
         width, height, has_manual_override = resolve_dimensions(
@@ -192,4 +230,25 @@ class A5PadScaleToTotalPixels:
         else:
             output = resize_bhwc(image, width, height, upscale_method)
 
-        return result_with_size(output, width, height)
+        return self.result_with_latent(output, width, height, blank=False)
+
+    @staticmethod
+    def result_with_latent(output, width, height, blank):
+        latent_width = ((width + 7) // 8) * 8
+        latent_height = ((height + 7) // 8) * 8
+        latent = {
+            "samples": torch.zeros(
+                (output.shape[0], 4, latent_height // 8, latent_width // 8),
+                device=comfy.model_management.intermediate_device(),
+                dtype=comfy.model_management.intermediate_dtype(),
+            ),
+            "downscale_ratio_spacial": 8,
+        }
+        result = result_with_size(output, width, height)
+        result["result"] += (latent,)
+        result["ui"].update({
+            "blank_image": [blank],
+            "latent_width": [latent_width],
+            "latent_height": [latent_height],
+        })
+        return result

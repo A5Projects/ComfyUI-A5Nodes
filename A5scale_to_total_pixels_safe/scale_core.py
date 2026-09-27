@@ -23,7 +23,8 @@ ASPECT_RATIO_OPTIONS = ["disabled", *ASPECT_RATIOS]
 OVERRIDE_TOOLTIP = (
     "Set to 0 to disable. One value sets that dimension; odd values round up "
     "to even. The other follows the preset, input aspect, or input size. Both "
-    "values set the canvas and disable automatic sizing."
+    "values set the canvas and disable automatic sizing. Without an image or "
+    "preset, one value uses total pixels to calculate the other dimension."
 )
 
 
@@ -270,6 +271,35 @@ def resolve_dimensions(
             dimension_rule,
         )
     return width, height, False
+
+
+def resolve_blank_dimensions(
+    target_total_pixels: int,
+    dimension_rule: str,
+    aspect_ratio: str,
+    width_override: int,
+    height_override: int,
+):
+    width = ensure_even(width_override) if int(width_override or 0) > 0 else 0
+    height = ensure_even(height_override) if int(height_override or 0) > 0 else 0
+    if width and height:
+        return width, height
+
+    ratio = aspect_ratio_value(aspect_ratio)
+    if width:
+        return width, round_even_dimension(
+            width / ratio if ratio is not None else target_total_pixels / width
+        )
+    if height:
+        return round_even_dimension(
+            height * ratio if ratio is not None else target_total_pixels / height
+        ), height
+    if ratio is not None:
+        return preset_dimensions_for_total(ratio, target_total_pixels, dimension_rule)
+    raise ValueError(
+        "No input image: select an aspect ratio or set a width/height override "
+        "to generate a blank canvas, or connect an image."
+    )
 
 
 def resize_bhwc(

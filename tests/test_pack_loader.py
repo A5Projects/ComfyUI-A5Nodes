@@ -50,7 +50,7 @@ def _install_import_stubs() -> None:
 
 
 class PackLoaderTests(unittest.TestCase):
-    def test_pack_exports_all_nine_node_ids(self):
+    def test_pack_exports_all_ten_node_ids(self):
         _install_import_stubs()
         package_name = "a5_pack_loader_test"
         spec = importlib.util.spec_from_file_location(
@@ -67,6 +67,7 @@ class PackLoaderTests(unittest.TestCase):
         self.assertEqual(
             set(module.NODE_CLASS_MAPPINGS),
             {
+                "A5MultiImageLoad",
                 "A5ClipPromptEnhancer",
                 "A5lmstudio_prompt_enhancer",
                 "A5TextPrompt",

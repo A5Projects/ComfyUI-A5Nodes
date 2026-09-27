@@ -72,14 +72,6 @@ def _strip_thinking_blocks(text: str) -> str:
     return text.strip()
 
 
-def _compose_generation_prompt(system_prompt: str, input_prompt: str) -> str:
-    system_prompt = system_prompt.strip()
-    input_prompt = input_prompt.strip()
-    if system_prompt and input_prompt:
-        return f"System instruction:\n{system_prompt}\n\nUser prompt:\n{input_prompt}"
-    return system_prompt or input_prompt
-
-
 def _update_hash_with_image(hasher: Any, image: Any) -> None:
     if image is None:
         hasher.update(b"no-image")
@@ -233,6 +225,7 @@ def _build_input_fingerprint(
     image_hasher = hashlib.sha256()
     _update_hash_with_image(image_hasher, image)
     payload = {
+        "prompt_format": 2,
         "system_prompt": system_prompt,
         "input_prompt": input_prompt,
         "image_sha256": image_hasher.hexdigest(),
@@ -319,7 +312,10 @@ def _default_template_input():
     options = {
         "optional": True,
         "default": True,
-        "tooltip": "Use the connected model's built-in prompt template.",
+        "tooltip": (
+            "Use the connected model's chat template. A nonempty system prompt "
+            "always enables it. For raw prompts, clear the system prompt and disable this."
+        ),
     }
     try:
         return io.Boolean.Input("use_default_template", advanced=True, **options)
@@ -501,12 +497,13 @@ class A5ClipPromptEnhancer(io.ComfyNode):
                 "ComfyUI if this persists; this node requires lazy-input support."
             )
         _ensure_generative_clip(clip)
-        prompt = _compose_generation_prompt(system_prompt, input_prompt)
+        system_prompt = system_prompt.strip()
         try:
             tokens = clip.tokenize(
-                prompt,
+                input_prompt,
+                system_prompt=system_prompt,
                 image=image,
-                skip_template=not use_default_template,
+                skip_template=not (use_default_template or system_prompt),
                 min_length=1,
                 thinking=thinking,
             )

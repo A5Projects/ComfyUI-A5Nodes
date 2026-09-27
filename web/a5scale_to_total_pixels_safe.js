@@ -1,8 +1,10 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const NODE_ID = "A5scale_to_total_pixels_safe";
 const COLOR_PICK_BUTTON = "pick_padding_color";
 const DISABLED_ASPECT_RATIO = "disabled";
+const trackedNodes = new Set();
 const ASPECT_RATIO_VALUES = new Set([
     DISABLED_ASPECT_RATIO,
     "1:1 (Square)",
@@ -104,7 +106,7 @@ function getReadout(message) {
     };
 }
 
-function setOutputLabels(node, width, height, sizeText) {
+function setOutputLabels(node, width, height, sizeText, message) {
     if (!node.outputs) {
         return;
     }
@@ -113,6 +115,9 @@ function setOutputLabels(node, width, height, sizeText) {
         width,
         height,
         size_text: sizeText,
+        latent: firstValue(message?.latent_width) !== undefined
+            ? `${firstValue(message.latent_width)}x${firstValue(message.latent_height)}`
+            : undefined,
     };
 
     for (const output of node.outputs) {
@@ -123,6 +128,9 @@ function setOutputLabels(node, width, height, sizeText) {
         const baseName = output.name ?? output.label;
         const value = valuesByName[baseName];
         output.label = value !== undefined ? `${value} ${baseName}` : baseName;
+        if (baseName === "image" && firstValue(message?.blank_image) === true) {
+            output.label = "image (blank: no input)";
+        }
     }
 }
 
@@ -359,6 +367,63 @@ function hasLinkedInput(node, name) {
     return Boolean(node.inputs?.some((input) => input.name === name && input.link != null));
 }
 
+function getGraphLink(graph, id) {
+    return graph?.getLink?.(id) ?? graph?.links?.get?.(id) ?? graph?.links?.[id];
+}
+
+function hasEffectiveImage(node, seen = new Set()) {
+    const input = node.inputs?.find((item) => item.name === "image");
+    return resolveImageLink(node.graph, input?.link, seen);
+}
+
+function resolveImageLink(graph, linkId, seen) {
+    if (linkId == null) return false;
+    if (seen.has(linkId)) return true;
+    seen.add(linkId);
+    const link = getGraphLink(graph, linkId);
+    const source = graph?.getNodeById?.(link?.origin_id);
+    // Unknown graph structures stay editable until execution reports their state.
+    if (!source) return true;
+    if (source.mode === 2) return false; // LiteGraph NEVER
+    if (source.mode !== 4 && !source.isVirtualNode) return true; // BYPASS
+    const matches = (input) => input?.type === "IMAGE" || input?.type === "*";
+    const sameSlot = source.inputs?.[link.origin_slot];
+    const input = matches(sameSlot) ? sameSlot
+        : source.inputs?.find((item) => item.type === "IMAGE")
+            ?? source.inputs?.find(matches);
+    return resolveImageLink(graph, input?.link, seen);
+}
+
+function readoutStateKey(node) {
+    const seen = new Set();
+    const states = [];
+    function visit(current) {
+        if (!current || seen.has(current)) return;
+        seen.add(current);
+        states.push([
+            current.id, current.mode,
+            current.widgets?.filter((widget) => !widget.name?.startsWith("a5_")
+                && widget.name !== COLOR_PICK_BUTTON).map((widget) => [
+                    widget.name,
+                    typeof widget.value === "object" ? String(widget.value) : widget.value,
+                ]),
+            current.inputs?.map((input) => [input.name, input.link]),
+        ]);
+        for (const input of current.inputs ?? []) {
+            const link = getGraphLink(current.graph, input.link);
+            visit(current.graph?.getNodeById?.(link?.origin_id));
+        }
+    }
+    visit(node);
+    return JSON.stringify(states);
+}
+
+function ensureLatentOutput(node) {
+    if (!node.outputs?.some((output) => output.name === "latent")) {
+        node.addOutput("latent", "LATENT");
+    }
+}
+
 function migrateDimensionRule(value) {
     return {
         mul4: "Multi4",
@@ -579,10 +644,18 @@ function setWidgetDisabled(widget, disabled) {
 }
 
 function updatePaddingControlState(node) {
+    const stateKey = readoutStateKey(node);
+    if (node.__a5ReadoutStateKey !== stateKey) {
+        node.__a5ReadoutStateKey = stateKey;
+        node.__a5ExecutedBlank = undefined;
+        setOutputLabels(node);
+    }
+    const noImage = node.__a5ExecutedBlank ?? !hasEffectiveImage(node);
     const targetTotalPixels = findWidget(node, "target_total_pixels");
     const dimensionRule = findWidget(node, "dimension_rule");
     const aspectRatio = findWidget(node, "aspect_ratio");
     const scalePolicy = findWidget(node, "scale_policy");
+    const upscaleMethod = findWidget(node, "upscale_method");
     const widthOverride = findWidget(node, "width_override");
     const heightOverride = findWidget(node, "height_override");
     const keepAspect = findWidget(node, "keep_aspect");
@@ -610,21 +683,25 @@ function updatePaddingControlState(node) {
     const paddingCanBeSelected = (
         aspectHandling?.value === "padding" || hasLinkedInput(node, "aspect_handling")
     );
-    const paddingControlsActive = aspectControlsActive && paddingCanBeSelected;
+    const canvasActive = noImage && (presetActive || manualOverrideActive);
+    const paddingControlsActive = !noImage && aspectControlsActive && paddingCanBeSelected;
+    const usesTargetForMissingSide = noImage && manualOverrideActive
+        && !bothOverridesActive && !presetActive;
 
-    setWidgetDisabled(targetTotalPixels, manualOverrideActive);
+    setWidgetDisabled(targetTotalPixels, manualOverrideActive && !usesTargetForMissingSide);
     setWidgetDisabled(dimensionRule, manualOverrideActive);
-    setWidgetDisabled(scalePolicy, manualOverrideActive);
+    setWidgetDisabled(scalePolicy, noImage || manualOverrideActive);
+    setWidgetDisabled(upscaleMethod, noImage);
     setWidgetDisabled(aspectRatio, bothOverridesActive);
-    setWidgetDisabled(keepAspect, keepAspectBypassed);
-    setWidgetDisabled(aspectHandling, !aspectControlsActive);
+    setWidgetDisabled(keepAspect, noImage || keepAspectBypassed);
+    setWidgetDisabled(aspectHandling, noImage || !aspectControlsActive);
     setWidgetDisabled(paddingSide, !paddingControlsActive);
-    setWidgetDisabled(paddingColor, !paddingControlsActive);
-    setWidgetDisabled(colorPickButton, !paddingControlsActive);
+    setWidgetDisabled(paddingColor, !canvasActive && !paddingControlsActive);
+    setWidgetDisabled(colorPickButton, !canvasActive && !paddingControlsActive);
 
     const divider = findWidget(node, "a5_aspect_mismatch_divider");
     if (divider) {
-        divider.inactive = !aspectControlsActive;
+        divider.inactive = !canvasActive && !(aspectControlsActive && !noImage);
     }
     node.setDirtyCanvas?.(true, true);
 }
@@ -729,6 +806,7 @@ function addPaddingColorPickerButton(node) {
 }
 
 function initializePaddingUi(node) {
+    trackedNodes.add(node);
     addSectionDivider(node, {
         name: "a5_aspect_mismatch_divider",
         label: "ASPECT MISMATCH",
@@ -736,10 +814,16 @@ function initializePaddingUi(node) {
     });
 
     for (const widgetName of [
+        "target_total_pixels",
+        "dimension_rule",
+        "scale_policy",
+        "upscale_method",
         "width_override",
         "height_override",
         "keep_aspect",
         "aspect_handling",
+        "padding_side",
+        "padding_color",
     ]) {
         chainPaddingStateCallback(node, widgetName);
     }
@@ -750,13 +834,23 @@ function initializePaddingUi(node) {
 }
 
 function updateResolutionReadout(node, message) {
+    node.__a5ReadoutStateKey = readoutStateKey(node);
+    node.__a5ExecutedBlank = firstValue(message?.blank_image);
     const { width, height, text } = getReadout(message);
-    setOutputLabels(node, width, height, text);
+    setOutputLabels(node, width, height, text, message);
+    updatePaddingControlState(node);
     node.setDirtyCanvas?.(true, true);
 }
 
 app.registerExtension({
     name: "A5.scale_to_total_pixels.readout_and_layout",
+    setup() {
+        api.addEventListener("graphChanged", () => {
+            for (const node of trackedNodes) {
+                if (node.graph) updatePaddingControlState(node);
+            }
+        });
+    },
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_ID) {
             return;
@@ -765,6 +859,7 @@ app.registerExtension({
         const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function (...args) {
             originalOnNodeCreated?.apply(this, args);
+            ensureLatentOutput(this);
             enforceMul16Default(this);
             addSectionDivider(this, {
                 name: "a5_manual_override_divider",
@@ -785,6 +880,8 @@ app.registerExtension({
             } finally {
                 this.__a5RestoringConfig = false;
             }
+            ensureLatentOutput(this);
+            this.__a5ReadoutStateKey = undefined;
             enforceMul16Default(this);
             initializePaddingUi(this);
             ensureNodeFitsWidgets(this);
@@ -802,6 +899,12 @@ app.registerExtension({
             const result = originalOnConnectionsChange?.apply(this, args);
             updatePaddingControlState(this);
             return result;
+        };
+
+        const originalOnRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function (...args) {
+            trackedNodes.delete(this);
+            return originalOnRemoved?.apply(this, args);
         };
     },
 });

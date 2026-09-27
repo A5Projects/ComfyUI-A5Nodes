@@ -1,11 +1,78 @@
 # A5 Custom Nodes
 
-A collection of nine custom nodes for ComfyUI covering prompt enhancement,
-prompt and note storage, text input, latent presets, image scaling, and
+A collection of ten custom nodes for ComfyUI covering prompt enhancement,
+prompt and note storage, text input, latent presets, image loading, scaling, and
 outpainting utilities.
 
 Existing A5 node IDs are preserved so workflows created with the standalone
 versions remain compatible.
+
+## Changes in 0.1.2
+
+- Fixed CLIP prompt enhancement to pass the system prompt through the model's
+  chat template instead of combining it with the user prompt.
+- Added A5 Multi Image Load with six reference outputs and an original-image list.
+- Updated scale/padding to generate solid-color canvases without an input image
+  and provide an empty latent output. Latent dimensions round up independently
+  to multiples of 8; this output is not an encoding of the image.
+
+
+## A5 Multi Image Load
+
+A compact 2-column × 3-row image loader with six independent `IMAGE` outputs
+and an `image_list` output for processing images individually. No masks or
+combined batch are produced.
+
+- Load each reference using its upload button, filename list, drag-and-drop,
+  or clipboard paste. Click a tile to select the paste destination; click a
+  loaded thumbnail for a larger preview.
+- Uncheck a tile to bypass its reference and exclude it from the list. The file
+  and cable remain in place; the other output numbers never move. Empty and
+  bypassed references return `None`, for receivers that accept absent images
+  (such as the Qwen multi-reference encoders). Required-image processors need
+  an active reference.
+- Drop multiple files on a tile to fill empty slots starting there and wrapping
+  through the remaining slots. Existing slots are preserved; overflow becomes
+  extra images. A single file replaces the targeted slot.
+- **Resize** changes only the six reference outputs, using the selected
+  megapixel target, Lanczos and the original aspect ratio. It starts disabled
+  with a 1 MP target. **Downscale only** is available in the node menu and the
+  `⋯` options button. Dimensions are rounded to pixels, not model multiples.
+- The bottom drop/paste area and `+` button append extras. Click its count to
+  reorder or remove entries. **Clear extras** preserves every preview slot and
+  never deletes files. Duplicate collection entries are retained.
+- `image_list` contains the original, unresized active slots in numerical order,
+  followed by the extras. Each list item is a single-image tensor; different
+  sizes and aspect ratios are preserved. Normal ComfyUI list processing invokes
+  downstream nodes for each item. An empty collection skips its processing
+  branch. Any additional resizing/batch conversion belongs downstream.
+
+Selections, bypass states, collection order and resize settings are stored in
+the workflow. Uploaded files use ComfyUI's normal input storage and must still
+be available when reopening the workflow on another machine. Decoding uses
+the installed core Load Image implementation; animated files contribute their
+first frame. The custom DOM controls support Classic and Nodes 2.0, using the
+normal Load Image file choices in a searchable text list.
+
+Backend/API input: `state` is a JSON string with `version: 1`, six
+`slots: [{file, enabled}, ...]`, `extras: [filename, ...]`, `resize`,
+`megapixels`, and `downscale_only`. Only the last output has `OUTPUT_IS_LIST`.
+
+Run regression checks from the repository root:
+
+```sh
+python -m unittest tests.test_multi_image_load tests.test_pack_loader
+node tests/test_multi_image_state.mjs
+node tests/test_multi_image_frontend.mjs
+```
+
+Validated with the installed ComfyUI 0.37.0 in an isolated CPU test server:
+mixed-size list execution and pixel preservation, independent reference resize,
+empty-list branch skipping, and uploads/paste, preview dialogs, collection
+management, save/reload and duplication in the browser. The compact widget was
+checked in both Classic and Nodes 2.0. Each bypass position was also exercised
+against the Qwen Image 2.1 input handler without loading model weights; full
+Qwen/H3 model generation is not part of these checks.
 
 ## Installation
 

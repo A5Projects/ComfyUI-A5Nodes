@@ -69,9 +69,14 @@ jobs:
           node --check web/clip_prompt_enhancer.js
           node --check web/lmstudio_prompt_enhancer.js
           node --check web/prompt_history_session.js
+          node --check web/a5_multi_image_load.js
+          node --check web/multi_image_state.js
 
       - name: Run frontend tests
         run: |
           node tests/test_a5_text_prompt_frontend.mjs
           node tests/test_clip_prompt_history.mjs
           node tests/test_lmstudio_prompt_history.mjs
+          node tests/test_scale_frontend.mjs
+          node tests/test_multi_image_state.mjs
+          node tests/test_multi_image_frontend.mjs

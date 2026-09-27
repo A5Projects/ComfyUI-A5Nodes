@@ -195,6 +195,28 @@ class ClipPromptEnhancerTests(unittest.TestCase):
         self.assertEqual([call[0] for call in clip.calls], ["tokenize", "generate", "decode"])
         unload.assert_called_once_with(clip)
 
+    def test_separate_system_prompt_and_template_selection(self):
+        for system, template, skip in [
+            ("  Enhance it  ", False, False),
+            ("", False, True),
+            ("", True, False),
+        ]:
+            with self.subTest(system=system, template=template):
+                clip = StubClip()
+                with mock.patch.object(enhancer, "_send_prompt_update"):
+                    enhancer.A5ClipPromptEnhancer.execute(
+                        **execute_kwargs(
+                            clip=clip,
+                            run_mode=enhancer.RUN_MODE_ALWAYS,
+                            system_prompt=system,
+                            use_default_template=template,
+                        ),
+                    )
+                _, prompt, options = clip.calls[0]
+                self.assertEqual(prompt, "A city at night")
+                self.assertEqual(options["system_prompt"], system.strip())
+                self.assertEqual(options["skip_template"], skip)
+
     def test_selective_unload_leaves_other_models_loaded(self):
         target_patcher = object()
         other_patcher = object()
@@ -206,7 +228,12 @@ class ClipPromptEnhancerTests(unittest.TestCase):
         model_management = types.ModuleType("comfy.model_management")
         model_management.current_loaded_models = loaded_models
         model_management.soft_empty_cache = mock.Mock()
-        with mock.patch.dict(sys.modules, {"comfy.model_management": model_management}):
+        comfy_stub = types.ModuleType("comfy")
+        comfy_stub.model_management = model_management
+        with mock.patch.dict(sys.modules, {
+            "comfy": comfy_stub,
+            "comfy.model_management": model_management,
+        }):
             enhancer._unload_clip_from_vram(clip)
 
         self.assertEqual(loaded_models, [other])
