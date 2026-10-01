@@ -19,3 +19,4 @@ local-lm-agent.*
 **/a5note_database.json
 **/clip_prompt_enhancer_config.json
 **/lmstudio_prompt_enhancer_config.json
+comfyui_A5TextPrompt/snippets.json

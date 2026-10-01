@@ -12,6 +12,8 @@ class FakeElement {
         this.textContent = "";
         this.disabled = false;
         this.clickCalled = false;
+        this.isConnected = true;
+        this.selectionStart = this.selectionEnd = 0;
     }
 
     matches() {
@@ -28,9 +30,9 @@ class FakeElement {
         this.listeners.set(name, callbacks);
     }
 
-    dispatch(name) {
+    dispatch(name, detail = {}) {
         for (const callback of this.listeners.get(name) ?? []) {
-            callback({ type: name, target: this, stopPropagation() {} });
+            callback({ type: name, target: this, stopPropagation() {}, preventDefault() {}, ...detail });
         }
     }
 
@@ -50,7 +52,10 @@ class FakeElement {
         this.dispatch("click");
     }
 
-    remove() {}
+    remove() { this.isConnected = false; }
+    setAttribute(name, value) { this[name] = value; }
+    focus() { this.dispatch("focus"); }
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
 }
 
 const eventListeners = new Map();
@@ -77,7 +82,8 @@ const app = {
 globalThis.__a5TestApp = app;
 globalThis.document = {
     body: {
-        appendChild() {},
+        children: [],
+        appendChild(element) { this.children.push(element); },
     },
     createElement(tagName) {
         const element = new FakeElement("", tagName);
@@ -87,13 +93,14 @@ globalThis.document = {
         return element;
     },
 };
+globalThis.window = { innerWidth: 1200, innerHeight: 800 };
 globalThis.URL.createObjectURL = (blob) => {
     exportedBlob = blob;
     return "blob:a5-text-prompt-test";
 };
 globalThis.URL.revokeObjectURL = () => {};
 
-const sourcePath = new URL("../web/a5_text_prompt.js", import.meta.url);
+const sourcePath = new URL("../web/text_prompt_editor.js", import.meta.url);
 let source = await fs.readFile(sourcePath, "utf8");
 source = source.replace(
     'import { app } from "../../scripts/app.js";',
@@ -102,7 +109,13 @@ source = source.replace(
 source = source.replace('"./prompt_history_session.js"', JSON.stringify(
     new URL("../web/prompt_history_session.js", import.meta.url).href,
 ));
-await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const { registerTextPromptEditor } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+registerTextPromptEditor({
+    extrasFactory(node, actions) {
+        node.insertSnippet = actions.insert;
+        return {};
+    },
+});
 
 assert.ok(extension, "frontend extension registered");
 
@@ -182,7 +195,7 @@ app.graph._nodes.push(first);
 assert.equal(position(first), "1/1", "history is seeded from saved text");
 assert.equal(toolbar(first).serialize, false, "toolbar is not serialized");
 assert.equal(toolbar(first).options.getHeight(), 34, "toolbar reserves one fixed-height row");
-assert.equal(toolbar(first).element.children.length, 5, "toolbar renders all inline controls");
+assert.equal(toolbar(first).element.children.length, 6, "toolbar includes the popout editor control");
 assert.equal(textWidget(first).value, "initial", "text widget stays present");
 
 editAndBlur(first, "manual one");
@@ -233,6 +246,44 @@ const second = new FakeNode(2, "separate");
 app.graph._nodes.push(second);
 assert.equal(position(second), "1/1", "node instances have isolated histories");
 assert.equal(textWidget(second).value, "separate");
+
+const editorNode = new FakeNode(8, "original");
+app.graph._nodes.push(editorNode);
+const originalSize = [...editorNode.size];
+clickToolbar(editorNode, "edit");
+const panel = document.body.children.at(-1);
+const popupText = panel.children[1];
+popupText.value = "edited in popout";
+popupText.dispatch("input");
+assert.equal(editorNode.textInput.value, "edited in popout", "popout updates inline field immediately");
+assert.equal(position(editorNode), "1/1", "typing waits for blur");
+popupText.dispatch("blur");
+assert.equal(position(editorNode), "2/2");
+editAndBlur(editorNode, "edited in node");
+assert.equal(popupText.value, "edited in node", "inline field updates popout immediately");
+eventListeners.get("a5_text_prompt.text_updated")({ detail: { node_id: 8, text: "external" } });
+assert.equal(popupText.value, "external", "external result updates the open popout");
+assert.equal(panel.isConnected, true, "execution does not close the popout");
+clickToolbar(editorNode, "previous");
+assert.equal(popupText.value, "edited in node", "history is shared across both editors");
+assert.deepEqual(editorNode.size, originalSize, "editing and navigation never resize the node");
+popupText.setSelectionRange(0, 6);
+popupText.dispatch("select");
+editorNode.insertSnippet("<image 1>");
+assert.equal(popupText.value, "<image 1> in node", "snippet replaces only the selected span");
+assert.equal(editorNode.textInput.value, popupText.value);
+assert.equal(popupText.selectionStart, "<image 1>".length, "insertion leaves caret after the snippet");
+panel.dispatch("keydown", { key: "Escape" });
+assert.equal(panel.isConnected, false, "Escape closes the focused popout");
+editorNode.insertSnippet(" append");
+assert.equal(editorNode.textInput.value, "<image 1> in node append", "closed editor selection is discarded");
+clickToolbar(editorNode, "edit");
+const reopened = document.body.children.at(-1);
+assert.equal(reopened.children[1].value, editorNode.textInput.value, "reopening shows the live value");
+clickToolbar(editorNode, "edit");
+assert.equal(document.body.children.at(-1), reopened, "opening twice reuses the same popout");
+editorNode.onRemoved();
+assert.equal(reopened.isConnected, false, "node removal closes the editor");
 
 editAndBlur(second, "second edit");
 assert.equal(position(second), "2/2");

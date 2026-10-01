@@ -5,7 +5,8 @@ import { readFile } from "node:fs/promises";
 class Element {
     constructor(tag) {
         this.tagName = tag; this.children = []; this.listeners = new Map();
-        this.attributes = {}; this.dataset = {}; this.className = "";
+        this.attributes = {}; this.dataset = {}; this.style = {}; this.className = "";
+        this.offsetWidth = 172; this.offsetHeight = 120;
         this.value = ""; this.naturalWidth = 0; this.hidden = false;
         this.classList = {
             contains: name => this.className.split(" ").includes(name),
@@ -22,35 +23,60 @@ class Element {
     replaceChildren(...children) { this.children.forEach(c => { c.parent = null; }); this.children = []; this.append(...children); }
     setAttribute(name, value) { this.attributes[name] = value; }
     removeAttribute(name) { delete this.attributes[name]; }
-    addEventListener(name, callback) {
+    addEventListener(name, callback, options = {}) {
         const callbacks = this.listeners.get(name) ?? [];
         callbacks.push(callback); this.listeners.set(name, callbacks);
+        options.signal?.addEventListener("abort", () => this.listeners.set(name,
+            (this.listeners.get(name) ?? []).filter(listener => listener !== callback)), { once: true });
     }
     dispatch(name, detail = {}) {
         const event = { target: this, preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {}, ...detail };
         for (const callback of this.listeners.get(name) ?? []) callback(event);
+        return event;
     }
     click() { if (!this.disabled) this.dispatch("click"); }
-    focus() { this.dispatch("focusin"); }
+    focus() { document.activeElement = this; this.dispatch("focusin"); }
     closest(selector) { return this.classList.contains(selector.slice(1)) ? this : this.parent?.closest(selector); }
-    querySelectorAll(selector) { return this.children.flatMap(c => [ ...(c.classList.contains(selector.slice(1)) ? [c] : []), ...c.querySelectorAll(selector)]); }
+    querySelectorAll(selector) { return this.children.flatMap(c => [ ...((selector.startsWith(".") ? c.classList.contains(selector.slice(1)) : c.tagName === selector) ? [c] : []), ...c.querySelectorAll(selector)]); }
+    contains(item) { return item === this || this.children.some(child => child.contains(item)); }
+    getBoundingClientRect() { return { left: 20, top: 30 }; }
     remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
     get isConnected() { return !!this.parent; }
     showModal() {}
     close() { this.dispatch("close"); }
 }
 globalThis.Element = Element;
-globalThis.document = { head: new Element("head"), body: new Element("body"),
+globalThis.document = Object.assign(new Element("document"), { head: new Element("head"), body: new Element("body"),
     createElement: tag => new Element(tag), createTextNode: text => Object.assign(new Element("text"), { textContent: text }),
     getElementById: id => document.head.children.find(c => c.id === id),
-};
+});
+globalThis.window = Object.assign(new Element("window"), { innerWidth: 800, innerHeight: 600 });
+globalThis.Image = class extends Element { constructor() { super("img"); } };
+let clipboardItems = [], clipboardReadError, clipboardWriteError, clipboardReadGate;
+const clipboardWrites = [], viewRequests = [];
+Object.defineProperty(globalThis.navigator, "clipboard", { configurable: true, value: {
+    async read() { if (clipboardReadGate) await clipboardReadGate; if (clipboardReadError) throw clipboardReadError; return clipboardItems; },
+    async write(items) { if (clipboardWriteError) throw clipboardWriteError; clipboardWrites.push(await items[0].data["image/png"]); },
+} });
+globalThis.ClipboardItem = class { constructor(data) { this.data = data; } };
+globalThis.__multiComfyApp = { copyToClipspace() {}, clipspace_invalidate_handler() {} };
 globalThis.location = { origin: "http://localhost:8188", href: "http://localhost:8188/" };
 let extension, failName, holdUpload;
+let choices = ["A.png", "Z.png", "a.png"], failChoices = false, choiceRequests = 0;
 const requests = [];
 globalThis.__multiApp = { registerExtension: value => { extension = value; } };
 globalThis.__multiApi = {
     apiURL: path => path,
     async fetchApi(path, options) {
+        if (path.startsWith("/view?")) {
+            viewRequests.push(path);
+            return { ok: true, blob: async () => new Blob(["original PNG pixels"], { type: "image/png" }) };
+        }
+        if (path === "/object_info/LoadImage") {
+            choiceRequests++;
+            return { ok: !failChoices, status: 503,
+                json: async () => ({ LoadImage: { input: { required: { image: [choices] } } } }) };
+        }
         assert.equal(path, "/upload/image");
         const file = options.body.get("image");
         requests.push(file.name);
@@ -65,7 +91,7 @@ const stateURL = dataURL(stateSource);
 const { defaultState } = await import(stateURL);
 const sourceURL = new URL("../web/a5_multi_image_load.js", import.meta.url);
 let source = await readFile(sourceURL, "utf8");
-source = source.replace('import { app } from "../../scripts/app.js";', 'const app = globalThis.__multiApp;')
+source = source.replace('import { app, ComfyApp } from "../../scripts/app.js";', 'const app = globalThis.__multiApp; const ComfyApp = globalThis.__multiComfyApp;')
     .replace('import { api } from "../../scripts/api.js";', 'const api = globalThis.__multiApi;')
     .replace('"./multi_image_state.js"', JSON.stringify(stateURL))
     .replaceAll("import.meta.url", JSON.stringify(sourceURL.href));
@@ -98,6 +124,117 @@ const settle = async node => {
 const unrelated = { name: "LoadImage", input: { required: { state: ["STRING"] } } };
 extension.beforeRegisterNodeDef(null, unrelated);
 assert.equal(unrelated.input.required.state[0], "STRING");
+
+// Navigation works directly from the filename row, without opening a dialog.
+const navigationState = defaultState();
+navigationState.slots[0] = { file: "A.png", enabled: false };
+const navigation = makeNode(navigationState);
+const arrows = tiles(navigation)[0].querySelectorAll(".a5-multi-step");
+const nextImage = async () => { arrows[1].click(); await new Promise(setImmediate); };
+const previousImage = async () => { arrows[0].click(); await new Promise(setImmediate); };
+const dialogsBefore = document.body.children.length;
+await nextImage();
+assert.equal(read(navigation).slots[0].file, "Z.png", "retain normal loader order rather than locale sorting");
+assert.equal(read(navigation).slots[0].enabled, false);
+assert.deepEqual(navigation.outputs[0].links, [42]);
+assert.deepEqual(read(navigation).slots.slice(1), navigationState.slots.slice(1));
+await previousImage();
+assert.equal(read(navigation).slots[0].file, "A.png");
+await previousImage();
+assert.equal(read(navigation).slots[0].file, "A.png", "stop at the beginning of the list");
+const callsBefore = choiceRequests;
+arrows[1].click(); arrows[1].click();
+await new Promise(setImmediate);
+assert.equal(choiceRequests, callsBefore + 1, "rapid clicks share the in-flight request");
+assert.equal(read(navigation).slots[0].file, "a.png", "rapid clicks each advance the selection");
+await nextImage();
+assert.equal(read(navigation).slots[0].file, "a.png", "stop at the end without emptying the slot");
+choices.push("new-upload.png");
+await nextImage();
+assert.equal(read(navigation).slots[0].file, "new-upload.png", "refresh choices to include new uploads");
+assert.equal(document.body.children.length, dialogsBefore);
+assert.match(tiles(navigation)[0].children[0].children[0].src, /new-upload.png/);
+failChoices = true;
+await previousImage();
+assert.equal(read(navigation).slots[0].file, "new-upload.png");
+assert.match(navigation.root.querySelectorAll(".a5-multi-status")[0].textContent, /503/);
+failChoices = false;
+choices = [];
+const emptyNavigation = makeNode();
+emptyNavigation.root.querySelectorAll(".a5-multi-step")[1].click();
+await new Promise(setImmediate);
+assert.deepEqual(read(emptyNavigation), defaultState(), "an empty server list is a safe no-op");
+
+// Empty and populated slots have their own menu, with no native menu/dialog.
+const contextNode = makeNode();
+const menu = () => document.body.querySelectorAll(".a5-multi-image-menu")[0];
+const menuItem = label => menu().children.find(item => item.textContent === label);
+let prevented = false, stopped = false;
+tiles(contextNode)[3].dispatch("contextmenu", { clientX: 790, clientY: 590,
+    preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+assert.ok(prevented && stopped);
+assert.equal(menu().attributes["aria-label"], "Image 4 actions");
+assert.equal(menu().style.left, "624px", "menu stays inside the viewport at any node zoom");
+assert.equal(menuItem("Paste image").disabled, false);
+assert.equal(menuItem("Copy image").disabled, true);
+assert.equal(menuItem("Copy (Clipspace)").disabled, true);
+assert.equal(document.body.querySelectorAll("dialog").length, 0);
+clipboardItems = [{ types: ["text/html", "image/png"], getType: async () => file("clipboard.png") }];
+let releaseRead;
+clipboardReadGate = new Promise(resolve => { releaseRead = resolve; });
+menuItem("Paste image").click();
+assert.equal(menu(), undefined);
+tiles(contextNode)[0].focus();
+releaseRead(); await new Promise(setImmediate); await settle(contextNode); clipboardReadGate = null;
+assert.equal(read(contextNode).slots[3].file, "uploads/pasted-image.png", "capture the clicked slot before clipboard permission/read awaits");
+assert.equal(read(contextNode).slots[0].file, "");
+assert.deepEqual(contextNode.outputs[3].links, [42]);
+
+const beforeCopy = contextNode.widget.value;
+tiles(contextNode)[3].dispatch("contextmenu");
+menuItem("Copy image").click();
+await new Promise(setImmediate);
+assert.equal(await clipboardWrites.at(-1).text(), "original PNG pixels");
+assert.match(viewRequests.at(-1), /filename=pasted-image.png.*subfolder=uploads/);
+tiles(contextNode)[3].dispatch("contextmenu");
+menuItem("Copy (Clipspace)").click();
+assert.equal(__multiComfyApp.clipspace.imgs.length, 1);
+assert.deepEqual(__multiComfyApp.clipspace.images, [{ filename: "pasted-image.png", subfolder: "uploads", type: "input" }]);
+assert.equal(__multiComfyApp.clipspace.widgets[0].value, "uploads/pasted-image.png");
+assert.equal(contextNode.widget.value, beforeCopy, "copy actions leave workflow state intact");
+
+// Escape restores slot focus for native Ctrl+V even when that slot is empty.
+tiles(contextNode)[2].dispatch("contextmenu");
+menu().dispatch("keydown", { key: "Escape" });
+assert.equal(document.activeElement, tiles(contextNode)[2]);
+contextNode.root.dispatch("paste", { clipboardData: { files: [file("empty-slot.png")] } });
+await settle(contextNode);
+assert.equal(read(contextNode).slots[2].file, "uploads/empty-slot.png");
+clipboardReadError = new Error("Permission denied");
+tiles(contextNode)[1].dispatch("contextmenu");
+menuItem("Paste image").click(); await new Promise(setImmediate);
+assert.equal(document.activeElement, tiles(contextNode)[1]);
+assert.match(contextNode.root.querySelectorAll(".a5-multi-status")[0].textContent, /Permission denied.*Ctrl\+V/);
+assert.equal(read(contextNode).slots[1].file, "");
+clipboardReadError = null; clipboardItems = [];
+tiles(contextNode)[1].dispatch("contextmenu");
+menuItem("Paste image").click(); await new Promise(setImmediate);
+assert.match(contextNode.root.querySelectorAll(".a5-multi-status")[0].textContent, /No image found/);
+
+tiles(contextNode)[3].dispatch("contextmenu");
+tiles(navigation)[0].dispatch("contextmenu");
+assert.equal(document.body.querySelectorAll(".a5-multi-image-menu").length, 1);
+document.dispatch("pointerdown", { target: document.body });
+assert.equal(menu(), undefined);
+const savedCopy = __multiComfyApp.copyToClipspace;
+delete __multiComfyApp.copyToClipspace;
+tiles(contextNode)[3].dispatch("contextmenu");
+assert.equal(menuItem("Copy (Clipspace)"), undefined, "omit Clipspace on frontends without its API");
+__multiComfyApp.copyToClipspace = savedCopy;
+contextNode.onRemoved();
+assert.equal(menu(), undefined, "node removal cleans up menu and global event listeners");
+assert.equal(document.listeners.get("pointerdown").length, 0);
+
 const node = makeNode();
 await node.onDragDrop(dropEvent(tiles(node)[4], [file("a.png"), file("b.png"), file("c.png")]));
 assert.deepEqual(read(node).slots.map(s => s.file), ["uploads/c.png", "", "", "", "uploads/a.png", "uploads/b.png"]);

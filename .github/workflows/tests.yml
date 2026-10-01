@@ -71,6 +71,8 @@ jobs:
           node --check web/prompt_history_session.js
           node --check web/a5_multi_image_load.js
           node --check web/multi_image_state.js
+          node --check web/snippet_buttons.js
+          node --check web/text_prompt_editor.js
 
       - name: Run frontend tests
         run: |
@@ -80,3 +82,4 @@ jobs:
           node tests/test_scale_frontend.mjs
           node tests/test_multi_image_state.mjs
           node tests/test_multi_image_frontend.mjs
+          node tests/test_snippet_frontend.mjs

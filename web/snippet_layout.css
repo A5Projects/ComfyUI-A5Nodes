@@ -1,0 +1,7 @@
+/* Nodes 2.0 makes every custom DOM widget an expanding "auto" grid row.
+   This node has four rows: replacement switch, text, history, snippets.
+   Override its inline tracks so only text receives the spare height.
+   Classic and the popout have no .lg-node-widgets grid and are unaffected. */
+.lg-node-widgets:has([node-type="A5TextPrompt"]) {
+    grid-template-rows: min-content minmax(80px, 1fr) min-content min-content !important;
+}

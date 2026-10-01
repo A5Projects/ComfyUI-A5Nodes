@@ -7,6 +7,14 @@ outpainting utilities.
 Existing A5 node IDs are preserved so workflows created with the standalone
 versions remain compatible.
 
+## Changes in 0.1.3
+
+- Added previous/next image arrows and a per-slot context menu to Multi Image Load.
+- Added eight shared, editable snippets and a movable, resizable popout editor
+  to the regular A5TextPrompt node. No experimental node is required.
+- Saved snippets remain local in `comfyui_A5TextPrompt/snippets.json`; preserve
+  that file when replacing the pack directory.
+
 ## Changes in 0.1.2
 
 - Fixed CLIP prompt enhancement to pass the system prompt through the model's
@@ -23,9 +31,12 @@ A compact 2-column × 3-row image loader with six independent `IMAGE` outputs
 and an `image_list` output for processing images individually. No masks or
 combined batch are produced.
 
+- Use each slot's previous/next arrows to browse the available image filenames.
 - Load each reference using its upload button, filename list, drag-and-drop,
-  or clipboard paste. Click a tile to select the paste destination; click a
-  loaded thumbnail for a larger preview.
+  or clipboard paste. Right-click any slot, including an empty one, for
+  **Paste image**, **Copy image**, and **Copy (Clipspace)** when supported.
+  Copy uses the original image. Right-click then Escape also selects a slot
+  for Ctrl+V without opening a dialog. Click a loaded thumbnail for a larger preview.
 - Uncheck a tile to bypass its reference and exclude it from the list. The file
   and cable remain in place; the other output numbers never move. Empty and
   bypassed references return `None`, for receivers that accept absent images
@@ -200,6 +211,46 @@ stores up to 20 last, saves when one is sent in externally OR you type and then 
 <img width="344" height="220" alt="image" src="https://github.com/user-attachments/assets/4d81f115-230a-4a63-8f76-006b49bdbd2c" />
 
 It is basically the simpler, text only, undo capable text editing part of my PromptEnhancer node
+
+The popout icon beside the history/export controls opens a movable, resizable
+editor above the ComfyUI canvas. It edits the same text as the node, immediately
+in both directions, and includes the same 20-prompt history and text export.
+It stays open during execution and when the node is off-screen or zoomed out.
+Press Escape while focused inside it to close; closing commits pending edits.
+The popout does not resize the node. External text replacement still follows
+the node's existing allow/block switch.
+
+Eight snippet buttons are available in both the node and popout. Clicking one
+inserts its exact text at the cursor (or replaces only the selected text),
+without replacing the rest of the prompt. Hover for the full snippet content.
+Expand **Edit snippets** to choose a slot, edit its label/text, and save or clear
+it. The settings start collapsed; there are no categories. Include any wanted
+spaces/newlines in the snippet itself.
+
+Snippet clicks behave like typing, not separate history entries. A completed
+edit is captured on leaving the text field or queueing a run; closing the
+popout, history navigation and export also capture pending edits. In Nodes 2.0,
+only the text field expands to use spare space, including after the snippet
+settings are collapsed. Classic and popout sizing remain independent.
+
+Snippets are shared across this node's instances and workflows and saved in
+`comfyui_A5TextPrompt/snippets.json` inside the pack. Preserve that file when
+replacing the pack directory. The experimental node is no longer needed;
+the pack uses its own code, endpoint and data, with no dependency on it.
+The regular node name remains **A5TextPrompt**.
+
+Text-node regression checks:
+
+```sh
+python -m unittest tests.test_a5_text_prompt tests.test_text_snippets tests.test_pack_loader
+node tests/test_a5_text_prompt_frontend.mjs
+node tests/test_snippet_frontend.mjs
+```
+
+With Playwright available, `tests/test_text_prompt_browser.cjs` checks the live
+node in Classic and Nodes 2.0. Set `COMFY_TEST_URL` to an isolated test server
+with only this pack enabled. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select a local
+browser. The test changes that test server's UI settings.
 
 A5 Note database
 --

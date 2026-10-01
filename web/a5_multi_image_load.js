@@ -1,4 +1,4 @@
-import { app } from "../../scripts/app.js";
+import { app, ComfyApp } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { defaultState, parseState, placeFiles, collectionFiles, referenceSize, imageLocation, annotatedFile } from "./multi_image_state.js";
 
@@ -6,6 +6,28 @@ const NODE_CLASS = "A5MultiImageLoad";
 const WIDGET_TYPE = "A5_MULTI_IMAGE_STATE";
 const editors = new WeakMap();
 const MIN_WIDGET_HEIGHT = 230;
+let dismissImageMenu = null;
+
+async function clipboardPNG(file, revision) {
+    const response = await api.fetchApi(`/view?${new URLSearchParams({ ...imageLocation(file), a5: String(revision) })}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    if (blob.type === "image/png") return blob;
+    // Clipboard image writes use PNG, including for JPEG/WebP sources. Decode at
+    // original size, never from the shrunken tile or the resized reference output.
+    const image = new Image();
+    const url = URL.createObjectURL(blob);
+    try {
+        image.src = url;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        canvas.getContext("2d").drawImage(image, 0, 0);
+        return await new Promise((resolve, reject) => canvas.toBlob(
+            png => png ? resolve(png) : reject(new Error("Could not encode image as PNG")), "image/png"));
+    } finally { URL.revokeObjectURL(url); }
+}
 
 function ensureStyle() {
     if (document.getElementById("a5-multi-image-style")) return;
@@ -50,10 +72,12 @@ function createEditor(node, inputName, inputData) {
     let selectedTarget = 0;
     let revision = Date.now();
     let uploadChain = Promise.resolve();
+    let imageChoicesRequest = null;
     let pendingUploads = 0;
     let removed = false;
     let dialog = null;
     let collectionDialog = null;
+    let closeImageMenu = null;
     const root = element("div", "a5-multi");
     root.setAttribute("aria-label", "A5 Multi Image Load controls");
     const grid = element("div", "a5-multi-grid");
@@ -204,6 +228,37 @@ function createEditor(node, inputName, inputData) {
         fileInput.click();
     }
 
+    async function imageChoices() {
+        // Refresh on interaction; concurrent arrow clicks share the same request.
+        if (!imageChoicesRequest) {
+            imageChoicesRequest = (async () => {
+                const response = await api.fetchApi("/object_info/LoadImage");
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const defs = await response.json();
+                const spec = defs.LoadImage?.input?.required?.image;
+                return Array.isArray(spec?.[0]) ? spec[0] : spec?.[1]?.options ?? [];
+            })().finally(() => { imageChoicesRequest = null; });
+        }
+        const choices = await imageChoicesRequest;
+        // Keep the normal loader's order, then include saved subfolder/output files.
+        return [...new Set([...choices.filter(name => typeof name === "string" && name),
+            ...state.slots.map(s => s.file).filter(Boolean), ...state.extras])];
+    }
+
+    async function stepImage(index, direction) {
+        selectTarget(index);
+        try {
+            const filenames = await imageChoices();
+            if (removed || invalidState) return;
+            if (!filenames.length) { message("No images available. Upload an image first."); return; }
+            const current = filenames.indexOf(state.slots[index].file);
+            const next = current < 0 ? (direction > 0 ? 0 : filenames.length - 1)
+                : Math.max(0, Math.min(filenames.length - 1, current + direction));
+            mutate(value => { value.slots[index].file = filenames[next]; });
+            message();
+        } catch (error) { if (!removed) message(`Could not load image choices: ${error.message}`, true); }
+    }
+
     async function chooseExisting(index) {
         selectTarget(index);
         const body = openDialog(`Image ${index + 1} · input files`);
@@ -240,14 +295,7 @@ function createEditor(node, inputName, inputData) {
         body.append(search, list, note, button("", "Use selected image", "Use selected image", useSelection));
         search.focus();
         try {
-            // Exactly the normal Load Image node's input list, refreshed on open.
-            const response = await api.fetchApi("/object_info/LoadImage");
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const defs = await response.json();
-            const spec = defs.LoadImage?.input?.required?.image;
-            const choices = Array.isArray(spec?.[0]) ? spec[0] : spec?.[1]?.options ?? [];
-            filenames = [...new Set([...choices.filter(name => typeof name === "string"),
-                ...state.slots.map(s => s.file).filter(Boolean), ...state.extras])].sort((a, b) => a.localeCompare(b));
+            filenames = await imageChoices();
             if (!body.isConnected) return;
             note.textContent = `${filenames.length} files`;
             filter();
@@ -263,6 +311,115 @@ function createEditor(node, inputName, inputData) {
         image.src = viewURL(slot.file, revision);
         image.alt = slot.file;
         body.append(image, element("div", "", tiles[index].preview.title));
+    }
+
+    function focusSlot(index) {
+        selectTarget(index);
+        tiles[index].root.focus({ preventScroll: true });
+    }
+
+    async function pasteClipboard(index) {
+        focusSlot(index);
+        try {
+            if (!navigator.clipboard?.read) throw new Error("Clipboard reading is unavailable in this browser");
+            const items = await navigator.clipboard.read();
+            const files = [];
+            for (const item of items) {
+                const type = item.types.find(type => type.startsWith("image/"));
+                if (!type) continue;
+                const blob = await item.getType(type);
+                const extension = type.split("/")[1].replace("jpeg", "jpg").replace(/[^a-z0-9]/gi, "");
+                files.push(new File([blob], `pasted-image.${extension || "png"}`, { type }));
+            }
+            if (removed) return;
+            if (!files.length) { message("No image found on the clipboard.", true); return; }
+            await upload(files, index);
+        } catch (error) {
+            if (!removed) message(`Could not read clipboard: ${error.message}. Image ${index + 1} is selected; press Ctrl+V (Cmd+V on Mac) to paste.`, true);
+        }
+    }
+
+    async function copyClipboard(index) {
+        const file = state.slots[index].file;
+        if (!file) return;
+        try {
+            if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+                throw new Error("Clipboard image copying is unavailable in this browser");
+            }
+            // Start the write during the menu click, preserving browser user activation.
+            await navigator.clipboard.write([new ClipboardItem({ "image/png": clipboardPNG(file, revision) })]);
+            if (!removed) message(`Image ${index + 1} copied to clipboard.`);
+        } catch (error) { if (!removed) message(`Could not copy image: ${error.message}`, true); }
+    }
+
+    function copyClipspace(index) {
+        const file = state.slots[index].file;
+        if (!file || typeof ComfyApp?.copyToClipspace !== "function") return;
+        // Use the public Clipspace payload for a single image, without passing
+        // this node's multi-image state widget or changing its preview/output data.
+        const image = new Image();
+        image.src = viewURL(file, revision);
+        ComfyApp.clipspace = {
+            widgets: [{ name: "image", type: "combo", value: file }],
+            imgs: [image], original_imgs: [image], images: [imageLocation(file)],
+            selectedIndex: 0, img_paste_mode: "selected", paintedIndex: 2, combinedIndex: 3,
+        };
+        ComfyApp.clipspace_return_node = null;
+        ComfyApp.clipspace_invalidate_handler?.();
+        message(`Image ${index + 1} copied to Clipspace.`);
+    }
+
+    function showImageMenu(event, index) {
+        event.preventDefault(); event.stopPropagation();
+        dismissImageMenu?.();
+        focusSlot(index);
+        const menu = element("div", "a5-multi-image-menu");
+        menu.setAttribute("role", "menu");
+        menu.setAttribute("aria-label", `Image ${index + 1} actions`);
+        menu.append(element("div", "a5-multi-menu-title", `Image ${index + 1}`));
+        const listeners = new AbortController();
+        const close = (restoreFocus = false) => {
+            listeners.abort(); menu.remove();
+            if (dismissImageMenu === close) dismissImageMenu = null;
+            closeImageMenu = null;
+            if (restoreFocus && !removed) focusSlot(index);
+        };
+        closeImageMenu = dismissImageMenu = close;
+        const add = (label, action, disabled = false) => {
+            const item = button("", label, label, () => { close(true); action(index); });
+            item.setAttribute("role", "menuitem");
+            item.disabled = disabled;
+            menu.append(item);
+            return item;
+        };
+        const paste = add("Paste image", pasteClipboard);
+        add("Copy image", copyClipboard, !state.slots[index].file);
+        if (typeof ComfyApp?.copyToClipspace === "function") {
+            add("Copy (Clipspace)", copyClipspace, !state.slots[index].file);
+        }
+        menu.addEventListener("contextmenu", e => { e.preventDefault(); e.stopPropagation(); });
+        menu.addEventListener("pointerdown", e => e.stopPropagation());
+        menu.addEventListener("keydown", e => {
+            e.stopPropagation();
+            const items = [...menu.querySelectorAll("button")].filter(item => !item.disabled);
+            const current = items.indexOf(document.activeElement);
+            if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+                e.preventDefault();
+                const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
+                    : (current + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+                items[next]?.focus();
+            } else if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); close(true); }
+            else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") close(true);
+        });
+        document.body.append(menu);
+        const bounds = tiles[index].root.getBoundingClientRect();
+        const x = event.clientX || bounds.left, y = event.clientY || bounds.top;
+        menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - menu.offsetWidth - 4))}px`;
+        menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - menu.offsetHeight - 4))}px`;
+        document.addEventListener("pointerdown", e => { if (!menu.contains(e.target)) close(); }, { capture: true, signal: listeners.signal });
+        window.addEventListener("resize", () => close(), { signal: listeners.signal });
+        document.addEventListener("wheel", () => close(), { capture: true, passive: true, signal: listeners.signal });
+        paste.focus();
     }
 
     function renderCollection(body) {
@@ -332,6 +489,8 @@ function createEditor(node, inputName, inputData) {
     for (let index = 0; index < 6; index++) {
         const tile = element("div", "a5-multi-tile");
         tile.dataset.slot = String(index);
+        tile.tabIndex = 0;
+        tile.setAttribute("aria-label", `Image ${index + 1} slot`);
         const enableLabel = element("label", "a5-multi-enable");
         const enable = element("input");
         enable.type = "checkbox";
@@ -345,11 +504,18 @@ function createEditor(node, inputName, inputData) {
         const placeholder = element("span", "a5-multi-placeholder", "Drop image");
         preview.append(image, placeholder);
         const fileRow = element("div", "a5-multi-file");
+        const selector = element("div", "a5-multi-selector");
         const filename = button("a5-multi-filename", "Choose image ▾", `Choose existing image ${index + 1}`, () => { void chooseExisting(index); });
-        fileRow.append(filename, button("a5-multi-upload", "↑", `Upload image ${index + 1}`, () => pickFiles(index)));
+        selector.append(
+            button("a5-multi-step", "◀", `Previous image for slot ${index + 1}`, () => { void stepImage(index, -1); }),
+            filename,
+            button("a5-multi-step", "▶", `Next image for slot ${index + 1}`, () => { void stepImage(index, 1); }),
+        );
+        fileRow.append(selector, button("a5-multi-upload", "↑", `Upload image ${index + 1}`, () => pickFiles(index)));
         tile.append(preview, enableLabel, fileRow);
         tile.addEventListener("pointerdown", () => selectTarget(index));
         tile.addEventListener("focusin", () => selectTarget(index));
+        tile.addEventListener("contextmenu", event => showImageMenu(event, index));
         image.addEventListener("load", () => refreshTooltip(index));
         image.addEventListener("error", () => { image.hidden = true; placeholder.hidden = false; placeholder.textContent = "Unavailable"; });
         tiles.push({ root: tile, enable, preview, image, placeholder, filename, file: undefined });
@@ -427,7 +593,7 @@ function createEditor(node, inputName, inputData) {
     widget.options.minNodeSize = [230, 390];
     const editor = { widget, root, getState: () => parseState(state), mutate,
         refresh() { revision = Date.now(); render(); },
-        destroy() { removed = true; closeDialog(); },
+        destroy() { removed = true; closeImageMenu?.(); closeDialog(); },
         upload, drop, selectTarget,
     };
     editors.set(node, editor);
