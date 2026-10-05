@@ -11,7 +11,7 @@ versions remain compatible.
 
 - Added previous/next image arrows and a per-slot context menu to Multi Image Load.
 - Added eight shared, editable snippets and a movable, resizable popout editor
-  to the regular A5TextPrompt node. No experimental node is required.
+  to the regular A5TextPrompt node.
 - Saved snippets remain local in `comfyui_A5TextPrompt/snippets.json`; preserve
   that file when replacing the pack directory.
 
