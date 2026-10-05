@@ -24,7 +24,7 @@ versions remain compatible.
   and provide an empty latent output. Latent dimensions round up independently
   to multiples of 8; this output is not an encoding of the image.
 
-## Current changed and adds:
+## Current changed and added nodes (only major):
 <img width="1228" height="956" alt="image" src="https://github.com/user-attachments/assets/ce54ca0b-b0f9-4755-a277-c1bf972b564b" />
 
 ## A5 Multi Image Load
