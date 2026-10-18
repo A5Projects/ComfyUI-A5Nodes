@@ -39,6 +39,15 @@ function restoreNamedWidgetValues(node, info) {
   }
 }
 
+function ensureReferenceInputs(node) {
+  // Older saved graphs can replace the definition's input list on configure.
+  // Append missing sockets only; never reorder or replace existing connections.
+  if (typeof node.addInput !== "function") return;
+  for (const name of ["image_2", "image_3"]) {
+    if (!node.inputs?.some((input) => input.name === name)) node.addInput(name, "IMAGE");
+  }
+}
+
 function ensurePromptEditorStyles() {
   if (document.getElementById(PROMPT_EDITOR_STYLE_ID)) {
     return;
@@ -1318,12 +1327,12 @@ function isRealToken(value) {
   return typeof value === "string" && value.length > 0 && value !== MASKED_TOKEN;
 }
 
-async function saveApiToken(apiToken) {
+async function saveApiToken(apiToken, serverUrl, confirmLegacy = false) {
   try {
     const response = await fetch("/a5lmstudio_prompt_enhancer/api_token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_token: apiToken }),
+      body: JSON.stringify({ api_token: apiToken, server_url: serverUrl, confirm_legacy: confirmLegacy }),
     });
     return response.ok;
   } catch (error) {
@@ -1355,21 +1364,30 @@ function updateAllModelDropdowns() {
     const comfyClass = node?.comfyClass ?? node?.ComfyClass;
     if (comfyClass === "A5lmstudio_prompt_enhancer") {
       refreshModelChoices(node, { preserveCurrent: true });
+      refreshTokenStatus(node);
     }
   }
 }
 
-function saveApiTokenAndRefresh(apiToken) {
-  saveApiToken(apiToken).then((ok) => {
+function saveApiTokenAndRefresh(node, apiToken) {
+  const serverUrl = currentServerUrl(node);
+  return saveApiToken(apiToken, serverUrl).then((ok) => {
     if (ok) {
       updateAllModelDropdowns();
+      refreshTokenStatus(node);
+    } else if (currentServerUrl(node) === serverUrl) {
+      setTokenStatusLabel(node, "Token not saved — enter it again to retry");
+      const widget = findWidget(node, "api_token");
+      if (widget) widget.value = "";
     }
+    return ok;
   });
 }
 
-async function loadSavedConfig() {
+async function loadSavedConfig(serverUrl) {
   try {
-    const response = await fetch("/a5lmstudio_prompt_enhancer/config");
+    const params = new URLSearchParams({ server_url: serverUrl || "" });
+    const response = await fetch(`/a5lmstudio_prompt_enhancer/config?${params.toString()}`);
     if (!response.ok) {
       return null;
     }
@@ -1380,22 +1398,26 @@ async function loadSavedConfig() {
   }
 }
 
-function sanitizeTokenValue(widget) {
+function sanitizeTokenValue(node, widget) {
   if (!isRealToken(widget.value)) {
     return;
   }
-  saveApiTokenAndRefresh(widget.value);
+  saveApiTokenAndRefresh(node, widget.value);
   widget.value = MASKED_TOKEN;
 }
 
 function maskTokenWidget(node) {
   const widget = findWidget(node, "api_token");
-  if (!widget || widget.__lmstudioMasked) {
+  if (!widget) return;
+  if (widget.__lmstudioMasked) {
+    sanitizeTokenValue(node, widget);
     return;
   }
   widget.__lmstudioMasked = true;
   widget.options = { ...(widget.options ?? {}), password: true };
-  sanitizeTokenValue(widget);
+  sanitizeTokenValue(node, widget);
+  // Never put an entered credential in exported workflows or queued prompts.
+  widget.serializeValue = () => widget.value ? MASKED_TOKEN : "";
 
   const draw = widget.draw;
   widget.draw = function (ctx, node, width, posY, height) {
@@ -1417,7 +1439,7 @@ function maskTokenWidget(node) {
   const callback = widget.callback;
   widget.callback = function (value) {
     if (isRealToken(value)) {
-      saveApiTokenAndRefresh(value);
+      saveApiTokenAndRefresh(node, value);
       this.value = MASKED_TOKEN;
       value = MASKED_TOKEN;
     }
@@ -1425,7 +1447,7 @@ function maskTokenWidget(node) {
   };
 
   const applyMask = () => {
-    sanitizeTokenValue(widget);
+    sanitizeTokenValue(node, widget);
     setInputPasswordType(widget.inputEl);
     setInputPasswordType(widget.element);
   };
@@ -1475,7 +1497,9 @@ async function refreshModelChoices(node, { preserveCurrent = true } = {}) {
   }
 
   const previousValue = modelWidget.value;
-  const modelData = await loadModelChoices(currentServerUrl(node));
+  const serverUrl = currentServerUrl(node);
+  const modelData = await loadModelChoices(serverUrl);
+  if (currentServerUrl(node) !== serverUrl) return;
   const choices = Array.isArray(modelData?.choices) && modelData.choices.length
     ? modelData.choices
     : [{ value: "", label: DEFAULT_MODEL_LABEL }];
@@ -1510,17 +1534,13 @@ async function hydrateNodeFromSavedConfig(node) {
   }
   node.__lmstudioHydrated = true;
 
-  const config = await loadSavedConfig();
+  const serverUrl = currentServerUrl(node);
+  const config = await loadSavedConfig(serverUrl);
   if (!config) {
     return;
   }
 
-  const tokenWidget = findWidget(node, "api_token");
-  if (config.has_api_token && tokenWidget && !tokenWidget.value) {
-    tokenWidget.value = config.api_token_placeholder ?? MASKED_TOKEN;
-    tokenWidget.callback?.call(tokenWidget, tokenWidget.value);
-    maskTokenWidget(node);
-  }
+  await refreshTokenStatus(node);
 
   await refreshModelChoices(node, { preserveCurrent: true });
 
@@ -1537,9 +1557,71 @@ function patchServerUrlRefresh(node) {
   const callback = widget.callback;
   widget.callback = function (value) {
     const result = callback?.call(this, value);
+    const tokenWidget = findWidget(node, "api_token");
+    if (tokenWidget) tokenWidget.value = "";
+    refreshTokenStatus(node);
     refreshModelChoices(node, { preserveCurrent: false });
     return result;
   };
+}
+
+function setTokenStatusLabel(node, label) {
+  if (node.__a5TokenStatusButton) node.__a5TokenStatusButton.name = label;
+  app.graph?.setDirtyCanvas(true, true);
+}
+
+function setupTokenStatus(node) {
+  if (node.__a5TokenStatusButton) {
+    positionTokenStatus(node);
+    return;
+  }
+  if (!node.addWidget) return;
+  const button = node.addWidget("button", "Checking saved token…", null, async () => {
+    const serverUrl = currentServerUrl(node);
+    const config = await loadSavedConfig(serverUrl);
+    if (!config || currentServerUrl(node) !== serverUrl) return;
+    if (!config.has_api_token && config.legacy_token_pending) {
+      if (!window.confirm(`Use your previously saved token ONLY for this server?\n\n${config.server_key}\n\nConfirm only if this is the server that issued the token.`)) return;
+      if (currentServerUrl(node) !== serverUrl) return;
+      const ok = await saveApiToken("", serverUrl, true);
+      if (!ok) {
+        setTokenStatusLabel(node, "Could not confirm token — click to retry");
+        return;
+      }
+      updateAllModelDropdowns();
+    }
+    await refreshTokenStatus(node);
+  }, { serialize: false });
+  button.serialize = false;
+  node.__a5TokenStatusButton = button;
+  positionTokenStatus(node);
+}
+
+function positionTokenStatus(node) {
+  const button = node.__a5TokenStatusButton;
+  const server = findWidget(node, "server_url");
+  if (!button || !server || !node.widgets?.includes(button)) return;
+  node.widgets.splice(node.widgets.indexOf(button), 1);
+  node.widgets.splice(node.widgets.indexOf(server) + 1, 0, button);
+}
+
+async function refreshTokenStatus(node) {
+  setupTokenStatus(node);
+  const revision = (node.__a5TokenStatusRevision ?? 0) + 1;
+  node.__a5TokenStatusRevision = revision;
+  const serverUrl = currentServerUrl(node);
+  setTokenStatusLabel(node, "Checking saved token…");
+  const config = await loadSavedConfig(serverUrl);
+  if (currentServerUrl(node) !== serverUrl || revision !== node.__a5TokenStatusRevision) return;
+  if (!config) {
+    setTokenStatusLabel(node, "Could not check token — check server address / retry");
+    return;
+  }
+  const widget = findWidget(node, "api_token");
+  if (widget && !isRealToken(widget.value)) widget.value = config.has_api_token ? MASKED_TOKEN : "";
+  setTokenStatusLabel(node, config.has_api_token ? "Token saved for this server"
+    : config.legacy_token_pending ? "Confirm old token for this server…"
+    : "No token saved for this server");
 }
 
 function findEnhancerNode(nodeId) {
@@ -1589,6 +1671,7 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function (info) {
       restoreNamedWidgetValues(this, info);
       const result = onConfigure?.apply(this, arguments);
+      ensureReferenceInputs(this);
       const history = getPromptHistory(this);
       const prompt = promptValue(findWidget(this, "last_generated_prompt")?.value);
       if (!promptHistorySession.restore(this, history, prompt) && !history.initialized) {
@@ -1598,6 +1681,8 @@ app.registerExtension({
       history.initialized = true;
       syncPromptHistoryControls(this);
       syncPromptEditor(this, findWidget(this, "last_generated_prompt")?.value);
+      maskTokenWidget(this);
+      refreshTokenStatus(this);
       return result;
     };
 

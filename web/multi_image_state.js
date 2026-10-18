@@ -18,19 +18,16 @@ export function parseState(value) {
     return state;
 }
 
-export function placeFiles(state, files, target = "extras", fillEmpty = files.length > 1) {
+export function placeFiles(state, files, target = "extras") {
     const next = parseState(state);
     if (target === "extras") next.extras.push(...files);
     else if (Number.isInteger(target) && target >= 0 && target < SLOT_COUNT) {
-        if (files.length === 1 && !fillEmpty) next.slots[target].file = files[0];
-        else {
-            const available = Array.from({ length: SLOT_COUNT }, (_, i) => (target + i) % SLOT_COUNT)
-                .filter(i => !next.slots[i].file);
-            files.forEach((file, i) => {
-                if (i < available.length) next.slots[available[i]].file = file;
-                else next.extras.push(file);
-            });
-        }
+        // Replace in drop order, wrapping once through all six preview slots.
+        // Preserve each slot's enabled state; only images beyond six are extras.
+        files.forEach((file, i) => {
+            if (i < SLOT_COUNT) next.slots[(target + i) % SLOT_COUNT].file = file;
+            else next.extras.push(file);
+        });
     } else throw new Error("Invalid image target");
     return next;
 }

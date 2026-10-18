@@ -46,6 +46,9 @@ from A5scale_to_total_pixels_safe.pad_scale_to_total_pixels import (
 )
 from A5scale_to_total_pixels_safe.scale_core import (
     ASPECT_RATIOS,
+    DEFAULT_MEGAPIXELS,
+    PIXELS_PER_MEGAPIXEL,
+    megapixels_to_total_pixels,
     common_required_inputs,
     resolve_dimensions,
     preset_dimensions_for_total,
@@ -357,12 +360,83 @@ class BlankCanvasTests(unittest.TestCase):
         self.assertNotIn("image", schema["required"])
         self.assertEqual(schema["optional"]["image"][0], "IMAGE")
         self.assertEqual(node_class.RETURN_TYPES, ("IMAGE", "INT", "INT", "STRING", "LATENT"))
-        self.assertEqual(node_class.RETURN_NAMES, ("image", "width", "height", "size_text", "latent"))
+        self.assertEqual(node_class.RETURN_NAMES, ("image", "width", "height", "size_text", "Empty Latent"))
         self.assertEqual(list(schema["required"]), [
-            "target_total_pixels", "dimension_rule", "aspect_ratio", "scale_policy",
+            "dimension_rule", "aspect_ratio", "scale_policy",
             "upscale_method", "width_override", "height_override", "keep_aspect",
             "aspect_handling", "padding_side", "padding_color",
         ])
+
+
+class MegapixelsTests(unittest.TestCase):
+    def execute(self, **overrides):
+        values = {
+            "megapixels": 0.00390625, "dimension_rule": "Multi16",
+            "aspect_ratio": "16:9 (Widescreen)", "scale_policy": "both",
+            "upscale_method": "bilinear", "width_override": 0,
+            "height_override": 0, "keep_aspect": "on",
+            "aspect_handling": "padding", "padding_side": "right / bottom",
+            "padding_color": "#808080",
+        }
+        values.update(overrides)
+        return A5PadScaleToTotalPixels().execute(**values)
+
+    def test_units_and_default_match_comfyui_convention(self):
+        self.assertEqual(PIXELS_PER_MEGAPIXEL, 1024 * 1024)
+        for value, expected in ((1, 1048576), (2, 2097152), (0.4, 419430)):
+            self.assertEqual(megapixels_to_total_pixels(value), expected)
+        self.assertEqual(megapixels_to_total_pixels(DEFAULT_MEGAPIXELS), 1048576)
+
+    def test_pixel_to_megapixel_round_trip_preserves_saved_values(self):
+        for pixels in (4096, 400000, 786432, 2000000, 2000001, 268435456):
+            self.assertEqual(megapixels_to_total_pixels(pixels / PIXELS_PER_MEGAPIXEL), pixels)
+
+    def test_new_megapixels_match_legacy_pixels_in_every_sizing_mode(self):
+        image = torch.rand((2, 12, 16, 3))
+        for source in (None, image):
+            for preset in ASPECT_RATIOS:
+                for rule in ("any", "even", "Multi4", "Multi8", "Multi16", "Multi32"):
+                    for width, height in ((0, 0), (31, 0), (0, 31), (31, 23)):
+                        with self.subTest(image=source is not None, preset=preset,
+                                          rule=rule, overrides=(width, height)):
+                            settings = dict(image=source, aspect_ratio=preset,
+                                            dimension_rule=rule, width_override=width,
+                                            height_override=height)
+                            current = self.execute(**settings)
+                            legacy = self.execute(**settings, target_total_pixels=4096)
+                            self.assertEqual(current["result"][1:4], legacy["result"][1:4])
+                            self.assertTrue(torch.equal(current["result"][0], legacy["result"][0]))
+                            self.assertTrue(torch.equal(current["result"][4]["samples"],
+                                                        legacy["result"][4]["samples"]))
+                            self.assertEqual(current["ui"], legacy["ui"])
+
+    def test_legacy_wired_pixels_take_priority_over_megapixel_widget(self):
+        result = self.execute(megapixels=2, target_total_pixels=4096,
+                              aspect_ratio="1:1 (Square)")["result"]
+        self.assertEqual(result[1:3], (64, 64))
+
+    def test_single_override_without_image_uses_megapixel_target(self):
+        result = self.execute(megapixels=0.75, width_override=1025,
+                              aspect_ratio="disabled")["result"]
+        self.assertEqual(result[1:3], (1026, 768))
+
+    def test_invalid_megapixels_have_clear_error(self):
+        for value in (0, -1, float("inf"), float("nan")):
+            with self.assertRaisesRegex(ValueError, "Megapixels must be"):
+                self.execute(megapixels=value)
+
+    def test_schema_exposes_float_and_retains_legacy_int_api_input(self):
+        schema = A5PadScaleToTotalPixels.INPUT_TYPES()
+        kind, options = schema["optional"]["megapixels"]
+        self.assertEqual(kind, "FLOAT")
+        self.assertEqual(options["step"], 0.1)
+        self.assertEqual(options["default"], 1.0)
+        self.assertEqual(options["max"], 256)
+        self.assertEqual(options["min"], 4096 / PIXELS_PER_MEGAPIXEL)
+        self.assertIs(options["round"], False)
+        self.assertIn("1024 x 1024", options["tooltip"])
+        self.assertEqual(schema["optional"]["target_total_pixels"][0], "INT")
+        self.assertIs(schema["optional"]["target_total_pixels"][1]["forceInput"], True)
 
 
 if __name__ == "__main__":

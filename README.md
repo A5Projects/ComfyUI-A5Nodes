@@ -7,6 +7,27 @@ outpainting utilities.
 Existing A5 node IDs are preserved so workflows created with the standalone
 versions remain compatible.
 
+## Changes in 0.1.4
+
+- LM Studio Prompt Enhancer accepts up to three ordered reference images.
+  The first retains its existing resolution limit; references 2 and 3 are
+  downscaled to at most 1,000,000 pixels each. Auto bypass checks all references.
+- Saved server tokens are now bound to their server address. Older unassigned
+  tokens require explicit confirmation before use. Token status sits below the
+  server address, leaving **Edit last prompt** as the lowest button.
+- Scale/padding now displays as **A5Scale_Pad_to_total_pixels**, uses a compact
+  megapixel control, and labels its latent output **Empty Latent**. Existing
+  workflow values and connected legacy pixel inputs remain supported.
+- Multi-image drops replace previews in order from the target slot, wrapping
+  through all six slots before adding extras; bypass states and cables remain.
+- Registry publishing now waits for the full Python matrix and frontend tests
+  to pass for the exact release commit. README-only changes still skip CI.
+
+Restart ComfyUI and refresh the browser after updating so the Python backend
+and frontend load the same version. The Manager default-channel catalogue
+[registration request](https://github.com/Comfy-Org/ComfyUI-Manager/pull/3391)
+is separate from this registry release and is still awaiting approval.
+
 ## Changes in 0.1.3
 
 - Added previous/next image arrows and a per-slot context menu to Multi Image Load.
@@ -44,9 +65,10 @@ combined batch are produced.
   bypassed references return `None`, for receivers that accept absent images
   (such as the Qwen multi-reference encoders). Required-image processors need
   an active reference.
-- Drop multiple files on a tile to fill empty slots starting there and wrapping
-  through the remaining slots. Existing slots are preserved; overflow becomes
-  extra images. A single file replaces the targeted slot.
+- Drop multiple files on a tile to replace previews starting there and wrapping
+  through all six slots. Only files beyond the first six become extras. Bypass
+  states and cables stay in place. A single file replaces the targeted slot;
+  drops directly into the extras area append there without changing previews.
 - **Resize** changes only the six reference outputs, using the selected
   megapixel target, Lanczos and the original aspect ratio. It starts disabled
   with a 1 MP target. **Downscale only** is available in the node menu and the
@@ -164,8 +186,13 @@ This functionality (to edit the enhanced prompt) is the main reason, i made my o
 - Image below:  You need those settings in LMStudio (left) set, for those features in the Node (Right) to work!- - Including a token set in LMStudio and entered in the node!
 ![a5settings](https://cdn-uploads.huggingface.co/production/uploads/67786db89328893864293f2c/-Qxge2kUXUmLEi75EIpSu.jpeg)
 - Vision for images: Sending a image with your prompt requires a vision model to be loaded of course. The list shows an educated guess, but no precise pull. 
+
+The LM Studio enhancer accepts up to three optional references: `image`, `image_2`, and `image_3`. They are attached together in that order in one request. The first input keeps the existing 3,072-pixel longest-side limit; inputs 2 and 3 are downscaled to at most 1,000,000 pixels each, preserving aspect ratio and never upscaling. Only the first image of a batch is used on each socket. Empty sockets are skipped; attachment numbering follows the connected images in order. Keep references in the same order as the downstream editing model. Auto bypass checks all three references and their order. Existing single-image workflows continue to work.
+
 - NON LM Studio server: This should work with any openai compatible server, but it was made and tested using LM; Studio. Especially the model loading/unloading may not work with other servers.
 - Also keep in mind this was made for local use with a local llm, on a single computer. So it deliberately balances convenience and complexity with safety. The server token is never displayed in the node (XXX) BUT is saved in plain text in that json file. 
+
+Tokens are now saved separately for each server in `ComfyUI/user/A5-Nodes/lmstudio_credentials.json` (or your configured ComfyUI user directory), not in the workflow or node source. `http://localhost:1234`, the same address with `/v1`, and a trailing slash share a token. A different hostname, port, HTTP/HTTPS scheme, or custom API base path does not. Switching back remembers that server's token; a server without authentication still needs no token. The status button shows whether this server has a token. For an older, unassigned token, click **Confirm old token for this server…** and verify the displayed address before confirming. New installations simply enter a token in the existing field. HTTP redirects are refused; enter the final server URL explicitly. This does not replace access control for a shared or publicly exposed ComfyUI server.
 
 ## Prompt Database Node:
 Save multiple prompts (or whatever) with names, in three different categories (three separate sets of saved prompts). It's stored in the node's folder, in json file. so all saved prompts are available in any workflow in your comfy installation. Should be simple to understand.
@@ -174,8 +201,8 @@ Save multiple prompts (or whatever) with names, in three different categories (t
 Of course it doesn't have to be prompts. You can use it as simple database for whatever, any name and any text. Keep in mind it is saved in plain text in the nodes local folder! (a5prompt_database.json)  
 
 # quick look at the smaller nodes:
-### Scale to total pixels safe (now with Image padding).
-- Scale to pixel number, multi 8/16/32, scale only up, only down or both, select resacle method.
+### A5Scale_Pad_to_total_pixels (scale and image padding).
+- Set the target in megapixels (ComfyUI convention: 1 MPx = 1024 × 1024 pixels), multi 8/16/32, scale only up, only down or both, select resacle method. Existing saved pixel values are converted automatically, and legacy connected total-pixel inputs keep their original units.
 - exports the rescaled image. Exports the width and height as int. Displays the output resolution. Allows manual width and height override. With or without preserving Aspect.
 
 Image padding:

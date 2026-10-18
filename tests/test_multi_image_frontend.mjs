@@ -239,13 +239,35 @@ const node = makeNode();
 await node.onDragDrop(dropEvent(tiles(node)[4], [file("a.png"), file("b.png"), file("c.png")]));
 assert.deepEqual(read(node).slots.map(s => s.file), ["uploads/c.png", "", "", "", "uploads/a.png", "uploads/b.png"]);
 
-// A delayed multi-drop must not replace an occupied slot if another upload fails.
+// A partially failed multi-drop still replaces the targeted slot with the successful upload.
 failName = "bad.png";
 await node.onDragDrop(dropEvent(tiles(node)[4], [file("survives.png"), file("bad.png")]));
-assert.equal(read(node).slots[4].file, "uploads/a.png");
-assert.equal(read(node).slots[1].file, "uploads/survives.png");
+assert.equal(read(node).slots[4].file, "uploads/survives.png");
+assert.equal(read(node).slots[5].file, "uploads/b.png", "failed uploads leave the remaining previews intact");
+assert.equal(read(node).slots[1].file, "");
 assert.match(node.root.querySelectorAll(".a5-multi-status")[0].textContent, /bad.png/);
 failName = undefined;
+
+// Fully occupied previews are replaced in drop order; only the seventh and later files overflow.
+const filledState = defaultState();
+filledState.slots.forEach((slot, index) => { slot.file = `old-${index}.png`; });
+filledState.slots[4].enabled = false;
+filledState.extras = ["existing-extra.png"];
+const filled = makeNode(filledState);
+const replacementFiles = Array.from({ length: 8 }, (_, index) => file(`new-${index}.png`));
+await filled.onDragDrop(dropEvent(tiles(filled)[4], replacementFiles.slice(0, 3)));
+assert.deepEqual(read(filled).slots.map(s => s.file), ["uploads/new-2.png", "old-1.png", "old-2.png", "old-3.png", "uploads/new-0.png", "uploads/new-1.png"]);
+assert.deepEqual(read(filled).extras, ["existing-extra.png"]);
+await filled.onDragDrop(dropEvent(tiles(filled)[4], replacementFiles));
+assert.deepEqual(read(filled).slots.map(s => s.file), ["uploads/new-2.png", "uploads/new-3.png", "uploads/new-4.png", "uploads/new-5.png", "uploads/new-0.png", "uploads/new-1.png"]);
+assert.deepEqual(read(filled).extras, ["existing-extra.png", "uploads/new-6.png", "uploads/new-7.png"]);
+assert.equal(read(filled).slots[4].enabled, false);
+assert.ok(filled.outputs.every(output => output.links[0] === 42), "all cables stay connected");
+const beforeExtrasDrop = read(filled).slots;
+await filled.onDragDrop(dropEvent(extras(filled), replacementFiles.slice(0, 2)));
+assert.deepEqual(read(filled).slots, beforeExtrasDrop);
+assert.deepEqual(read(filled).extras.slice(-2), ["uploads/new-0.png", "uploads/new-1.png"]);
+filled.onRemoved();
 
 // Clipboard dispatch captures the selected destination before async upload.
 tiles(node)[2].dispatch("focusin");

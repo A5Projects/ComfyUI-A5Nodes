@@ -1,9 +1,12 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { setWidgetConfig } from "../../extensions/core/widgetInputs.js";
 
 const NODE_ID = "A5scale_to_total_pixels_safe";
 const COLOR_PICK_BUTTON = "pick_padding_color";
 const DISABLED_ASPECT_RATIO = "disabled";
+const PIXELS_PER_MEGAPIXEL = 1024 * 1024;
+const EMPTY_LATENT_NAME = "Empty Latent";
 const trackedNodes = new Set();
 const ASPECT_RATIO_VALUES = new Set([
     DISABLED_ASPECT_RATIO,
@@ -115,7 +118,7 @@ function setOutputLabels(node, width, height, sizeText, message) {
         width,
         height,
         size_text: sizeText,
-        latent: firstValue(message?.latent_width) !== undefined
+        [EMPTY_LATENT_NAME]: firstValue(message?.latent_width) !== undefined
             ? `${firstValue(message.latent_width)}x${firstValue(message.latent_height)}`
             : undefined,
     };
@@ -419,9 +422,85 @@ function readoutStateKey(node) {
 }
 
 function ensureLatentOutput(node) {
-    if (!node.outputs?.some((output) => output.name === "latent")) {
-        node.addOutput("latent", "LATENT");
+    const output = node.outputs?.find((item) => (
+        item.type === "LATENT" && ["latent", EMPTY_LATENT_NAME].includes(item.name)
+    ));
+    if (output) {
+        output.name = EMPTY_LATENT_NAME;
+    } else {
+        node.addOutput(EMPTY_LATENT_NAME, "LATENT");
     }
+}
+
+function initializeMegapixelsUi(node) {
+    node.properties ??= {};
+    node.properties.a5_size_unit = "megapixels";
+    const index = node.widgets?.findIndex((widget) => widget.name === "megapixels");
+    if (index > 0) {
+        node.widgets.unshift(...node.widgets.splice(index, 1));
+    }
+    const widget = findWidget(node, "megapixels");
+    if (widget) {
+        // ComfyUI otherwise rounds float edits to the 0.1 arrow step. Keep
+        // finer entered/migrated targets, with a compact three-decimal display.
+        widget.options ??= {};
+        widget.options.round = false;
+        widget.options.precision = 3;
+    }
+    // Keep old wired INT inputs in pixel units without an extra visible control.
+    const legacyIndex = node.inputs?.findIndex((input) => input.name === "target_total_pixels");
+    if (legacyIndex >= 0) {
+        const input = node.inputs[legacyIndex];
+        if (input.link == null) {
+            node.removeInput(legacyIndex);
+        } else {
+            ensureLegacyPixelWidget(node, input);
+        }
+    }
+}
+
+function ensureLegacyPixelWidget(node, input) {
+    let widget = findWidget(node, "target_total_pixels");
+    if (!widget) {
+        widget = node.addWidget("number", "target_total_pixels",
+            Math.round(findWidget(node, "megapixels").value * PIXELS_PER_MEGAPIXEL),
+            () => updatePaddingControlState(node), { min: 4096, max: 268435456, step: 10 });
+        widget.type = "converted-widget";
+        widget.hidden = true;
+        widget.serialize = false;
+        widget.computeSize = () => [0, -4];
+        widget.serializeValue = () => hasLinkedInput(node, "target_total_pixels")
+            ? widget.value : undefined;
+    }
+    if (!input.__a5LegacyPixelWidget) {
+        input.widget ??= { name: "target_total_pixels" };
+        input.__a5LegacyPixelWidget = true;
+        setWidgetConfig(input, ["INT", { default: widget.value, min: 4096, max: 268435456, step: 1 }]);
+    }
+}
+
+function migrateMegapixelsConfig(config) {
+    const named = config?.widgets_values_named;
+    const alreadyMegapixels = config?.properties?.a5_size_unit === "megapixels"
+        || named?.megapixels !== undefined;
+    const migrated = {
+        ...config,
+        properties: { ...config?.properties, a5_size_unit: "megapixels" },
+    };
+    if (Array.isArray(config?.widgets_values)) {
+        migrated.widgets_values = [...config.widgets_values];
+        if (!alreadyMegapixels && typeof migrated.widgets_values[0] === "number") {
+            migrated.widgets_values[0] /= PIXELS_PER_MEGAPIXEL;
+        }
+    }
+    if (named && typeof named === "object") {
+        migrated.widgets_values_named = { ...named };
+        if (named.megapixels === undefined && typeof named.target_total_pixels === "number") {
+            migrated.widgets_values_named.megapixels = named.target_total_pixels / PIXELS_PER_MEGAPIXEL;
+        }
+        delete migrated.widgets_values_named.target_total_pixels;
+    }
+    return migrated;
 }
 
 function migrateDimensionRule(value) {
@@ -651,7 +730,7 @@ function updatePaddingControlState(node) {
         setOutputLabels(node);
     }
     const noImage = node.__a5ExecutedBlank ?? !hasEffectiveImage(node);
-    const targetTotalPixels = findWidget(node, "target_total_pixels");
+    const megapixels = findWidget(node, "megapixels");
     const dimensionRule = findWidget(node, "dimension_rule");
     const aspectRatio = findWidget(node, "aspect_ratio");
     const scalePolicy = findWidget(node, "scale_policy");
@@ -688,7 +767,8 @@ function updatePaddingControlState(node) {
     const usesTargetForMissingSide = noImage && manualOverrideActive
         && !bothOverridesActive && !presetActive;
 
-    setWidgetDisabled(targetTotalPixels, manualOverrideActive && !usesTargetForMissingSide);
+    setWidgetDisabled(megapixels, hasLinkedInput(node, "target_total_pixels")
+        || (manualOverrideActive && !usesTargetForMissingSide));
     setWidgetDisabled(dimensionRule, manualOverrideActive);
     setWidgetDisabled(scalePolicy, noImage || manualOverrideActive);
     setWidgetDisabled(upscaleMethod, noImage);
@@ -814,7 +894,7 @@ function initializePaddingUi(node) {
     });
 
     for (const widgetName of [
-        "target_total_pixels",
+        "megapixels",
         "dimension_rule",
         "scale_policy",
         "upscale_method",
@@ -859,6 +939,7 @@ app.registerExtension({
         const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function (...args) {
             originalOnNodeCreated?.apply(this, args);
+            initializeMegapixelsUi(this);
             ensureLatentOutput(this);
             enforceMul16Default(this);
             addSectionDivider(this, {
@@ -872,7 +953,7 @@ app.registerExtension({
 
         const originalConfigure = nodeType.prototype.configure;
         nodeType.prototype.configure = function (config, ...args) {
-            const migratedConfig = migrateBasicWidgetLayout(config);
+            const migratedConfig = migrateMegapixelsConfig(migrateBasicWidgetLayout(config));
             this.__a5RestoringConfig = true;
             let result;
             try {
@@ -880,6 +961,7 @@ app.registerExtension({
             } finally {
                 this.__a5RestoringConfig = false;
             }
+            initializeMegapixelsUi(this);
             ensureLatentOutput(this);
             this.__a5ReadoutStateKey = undefined;
             enforceMul16Default(this);
@@ -897,6 +979,9 @@ app.registerExtension({
         const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (...args) {
             const result = originalOnConnectionsChange?.apply(this, args);
+            const legacyInput = this.inputs?.find((input) => input.name === "target_total_pixels"
+                && input.link != null);
+            if (legacyInput) ensureLegacyPixelWidget(this, legacyInput);
             updatePaddingControlState(this);
             return result;
         };

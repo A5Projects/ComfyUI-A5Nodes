@@ -8,11 +8,73 @@ on:
     paths-ignore:
       - "README.md"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the configured version after all tests pass (main only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  release-check:
+    name: Check registry publish eligibility
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish))
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - name: Check out exact commit and history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Check pyproject changes across the entire push
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A newly created branch has no previous commit. Compare to an empty tree.
+          if [[ "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+            BEFORE=$(git hash-object -t tree /dev/null)
+          else
+            # A force-push may leave the old tip outside the fetched history.
+            git cat-file -e "$BEFORE^{commit}" || git fetch --no-tags origin "$BEFORE"
+          fi
+          # Fail closed on missing history or any diff error.
+          git diff --name-only "$BEFORE" "$RELEASE_SHA" -- pyproject.toml > "$RUNNER_TEMP/release-files"
+          if grep -Fxq 'pyproject.toml' "$RUNNER_TEMP/release-files"; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish-node:
+    name: Publish tested commit
+    needs: [release-check, python-tests, frontend-tests]
+    # Explicit success checks also reject skipped jobs; never use always() here.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.release-check.result == 'success' &&
+      needs.release-check.outputs.publish == 'true' &&
+      needs.python-tests.result == 'success' &&
+      needs.frontend-tests.result == 'success'
+    uses: ./.github/workflows/publish_action.yml
+    secrets:
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+
   python-tests:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -31,6 +93,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -39,7 +103,7 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          python -m pip install pillow typing_extensions
+          python -m pip install pillow typing_extensions pyyaml
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Compile Python sources
@@ -56,6 +120,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7

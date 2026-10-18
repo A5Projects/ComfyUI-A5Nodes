@@ -4,8 +4,11 @@ import torch
 import comfy.model_management
 
 from .scale_core import (
+    DEFAULT_MEGAPIXELS,
+    PIXELS_PER_MEGAPIXEL,
     common_required_inputs,
     ensure_bhwc,
+    megapixels_to_total_pixels,
     resize_bhwc,
     resolve_dimensions,
     resolve_blank_dimensions,
@@ -127,6 +130,7 @@ class A5PadScaleToTotalPixels:
     def INPUT_TYPES(cls):
         required = common_required_inputs()
         required.pop("image")
+        legacy_pixels = required.pop("target_total_pixels")
         required.update(
             {
                 "aspect_handling": (
@@ -146,6 +150,20 @@ class A5PadScaleToTotalPixels:
         return {
             "required": required,
             "optional": {
+                # Both size inputs are optional so published pixel-based API
+                # prompts remain valid. The frontend presents megapixels first.
+                "megapixels": (
+                    "FLOAT",
+                    {
+                        "default": DEFAULT_MEGAPIXELS,
+                        "min": 4096 / PIXELS_PER_MEGAPIXEL,
+                        "max": 268435456 / PIXELS_PER_MEGAPIXEL,
+                        "step": 0.1,
+                        "round": False,
+                        "tooltip": "Target megapixels (MPx), using ComfyUI's convention: "
+                        "1 MPx = 1024 x 1024 pixels. Dimensions still follow dimension_rule.",
+                    },
+                ),
                 "image": (
                     "IMAGE",
                     {
@@ -153,11 +171,17 @@ class A5PadScaleToTotalPixels:
                         "manual dimension creates a canvas filled with padding_color.",
                     },
                 ),
+                "target_total_pixels": (
+                    "INT",
+                    {**legacy_pixels[1], "forceInput": True,
+                     "tooltip": "Legacy total-pixel input for existing workflows. "
+                     "When connected, it overrides megapixels."},
+                ),
             },
         }
 
     RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING", "LATENT")
-    RETURN_NAMES = ("image", "width", "height", "size_text", "latent")
+    RETURN_NAMES = ("image", "width", "height", "size_text", "Empty Latent")
     OUTPUT_TOOLTIPS = (
         "Resized/padded image, or a solid-color canvas when no image is supplied.",
         "Actual output image width in pixels.",
@@ -172,7 +196,6 @@ class A5PadScaleToTotalPixels:
 
     def execute(
         self,
-        target_total_pixels,
         dimension_rule,
         aspect_ratio,
         scale_policy,
@@ -184,7 +207,11 @@ class A5PadScaleToTotalPixels:
         padding_side,
         padding_color,
         image=None,
+        megapixels=DEFAULT_MEGAPIXELS,
+        target_total_pixels=None,
     ):
+        if target_total_pixels is None:
+            target_total_pixels = megapixels_to_total_pixels(megapixels)
         if image is None:
             width, height = resolve_blank_dimensions(
                 target_total_pixels, dimension_rule, aspect_ratio,

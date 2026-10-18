@@ -6,7 +6,9 @@ import gc
 import hashlib
 import io
 import json
+import math
 import re
+import threading
 from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
@@ -26,6 +28,7 @@ MAX_RECENT_MODELS = 5
 CHAT_COMPLETION_TIMEOUT_SECONDS = 3600
 DEFAULT_MAX_TOKENS = 12000
 MAX_IMAGE_LONG_SIDE = 3072
+MAX_EXTRA_IMAGE_PIXELS = 1_000_000
 MASKED_API_TOKEN = "XXXXXXXX"
 RUN_MODE_ALWAYS = "Always run LLM"
 RUN_MODE_BYPASS = "Bypass - send last/manual prompt"
@@ -35,6 +38,7 @@ PROMPT_UPDATE_EVENT = "a5lmstudio_prompt_enhancer.prompt_updated"
 DEFAULT_MODEL_LABEL = "Use loaded default model"
 LEGACY_DEFAULT_MODEL_LABEL = "Use loaded/default model"
 VISION_LABEL_SUFFIX = " [vision?]"
+_CREDENTIALS_LOCK = threading.RLock()
 
 
 def _normalize_server_url(server_url: str) -> str:
@@ -45,6 +49,17 @@ def _normalize_server_url(server_url: str) -> str:
         url = f"http://{url}"
 
     parsed = parse.urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Use an http:// or https:// server address.")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Enter authentication in the token field, not the server address.")
+    if parsed.query or parsed.fragment or any(c.isspace() for c in url) or "\\" in url:
+        raise ValueError("Server addresses must not contain query strings, fragments or whitespace.")
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.encode("idna").decode("ascii").lower()
+    host = f"[{host}]" if ":" in host else host
+    port = parsed.port
+    authority = host if port is None or port == {"http": 80, "https": 443}[scheme] else f"{host}:{port}"
     path = parsed.path.rstrip("/")
     if not path:
         path = "/v1"
@@ -52,7 +67,7 @@ def _normalize_server_url(server_url: str) -> str:
         path = path[: -len("/chat/completions")] or "/v1"
 
     return parse.urlunparse(
-        (parsed.scheme, parsed.netloc, path, "", "", "")
+        (scheme, authority, path, "", "", "")
     ).rstrip("/")
 
 
@@ -80,6 +95,16 @@ def _build_headers(api_token: str = "") -> dict[str, str]:
     return headers
 
 
+class _NoRedirect(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward a saved credential to a redirect destination.
+        raise ValueError("LM server redirects are disabled. Enter the final server address explicitly.")
+
+
+def _open_request(req, timeout):
+    return request.build_opener(_NoRedirect()).open(req, timeout=timeout)
+
+
 def _post_json(
     url: str,
     payload: dict[str, Any],
@@ -95,7 +120,7 @@ def _post_json(
     )
 
     try:
-        with request.urlopen(req, timeout=timeout) as response:
+        with _open_request(req, timeout) as response:
             response_body = response.read().decode("utf-8")
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -116,7 +141,7 @@ def _get_json(url: str, api_token: str = "", timeout: int = 60) -> dict[str, Any
     )
 
     try:
-        with request.urlopen(req, timeout=timeout) as response:
+        with _open_request(req, timeout) as response:
             response_body = response.read().decode("utf-8")
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -220,35 +245,62 @@ def _remove_legacy_api_token(config: dict[str, Any]) -> None:
     _save_config(sanitized_config)
 
 
-def _load_saved_api_token() -> str:
+def _credentials_with_pending_legacy() -> dict[str, Any]:
+    """Move old source-side secrets out of source, but do not assign a server."""
     credentials = _load_credentials()
-    token = credentials.get("api_token")
-    if isinstance(token, str) and token:
-        _remove_legacy_api_token(_load_config())
-        return token
-
-    # Migrate tokens written by the former standalone node. The source-side
-    # value is removed only after the new credentials file succeeds.
     legacy_config = _load_config()
-    legacy_token = legacy_config.get("api_token")
-    if not isinstance(legacy_token, str) or not legacy_token:
-        return ""
-
-    try:
-        _save_credentials({"api_token": legacy_token})
-    except OSError:
-        return legacy_token
-    _remove_legacy_api_token(legacy_config)
-    return legacy_token
+    legacy_token = credentials.get("api_token") or legacy_config.get("api_token")
+    if isinstance(legacy_token, str) and legacy_token:
+        credentials["api_token"] = legacy_token
+        _save_credentials(credentials)
+        _remove_legacy_api_token(legacy_config)
+    return credentials
 
 
-def _save_api_token(api_token: str) -> None:
+def _load_saved_api_token(server_url: str) -> str:
+    key = _normalize_server_url(server_url)
+    with _CREDENTIALS_LOCK:
+        tokens = _load_credentials().get("server_tokens", {})
+        token = tokens.get(key) if isinstance(tokens, dict) else None
+    return token if isinstance(token, str) else ""
+
+
+def _credential_status(server_url: str) -> dict[str, Any]:
+    key = _normalize_server_url(server_url)
+    with _CREDENTIALS_LOCK:
+        credentials = _credentials_with_pending_legacy()
+        return {"server_key": key, "has_api_token": bool(_load_saved_api_token(key)),
+                "legacy_token_pending": bool(credentials.get("api_token"))}
+
+
+def _save_api_token(api_token: str, server_url: str) -> None:
+    key = _normalize_server_url(server_url)
     token = api_token.strip()
-    if not token:
-        return
+    if not token or token == MASKED_API_TOKEN:
+        raise ValueError("Enter a token for this server.")
+    with _CREDENTIALS_LOCK:
+        credentials = _credentials_with_pending_legacy()
+        tokens = credentials.setdefault("server_tokens", {})
+        if not isinstance(tokens, dict):
+            raise ValueError("Invalid saved server-token data.")
+        tokens[key] = token
+        credentials["version"] = 2
+        _save_credentials(credentials)
 
-    _save_credentials({"api_token": token})
-    _remove_legacy_api_token(_load_config())
+
+def _bind_legacy_api_token(server_url: str) -> None:
+    key = _normalize_server_url(server_url)
+    with _CREDENTIALS_LOCK:
+        credentials = _credentials_with_pending_legacy()
+        token = credentials.get("api_token")
+        if not isinstance(token, str) or not token:
+            raise ValueError("No old token is waiting for confirmation.")
+        if _load_saved_api_token(key):
+            raise ValueError("This server already has a saved token.")
+        _save_api_token(token, key)
+        credentials = _load_credentials()
+        credentials.pop("api_token", None)
+        _save_credentials(credentials)
 
 
 def _load_last_enhanced_prompt() -> str:
@@ -472,7 +524,7 @@ def _default_model_choice() -> str:
     return _combine_model_choices(recent_models[:1], [])[1]["label"] if recent_models else DEFAULT_MODEL_LABEL
 
 
-def _image_to_pil(image: Any) -> Image.Image:
+def _image_to_pil(image: Any, max_pixels: int | None = None) -> Image.Image:
     if hasattr(image, "detach"):
         image = image.detach().cpu().numpy()
 
@@ -499,26 +551,39 @@ def _image_to_pil(image: Any) -> Image.Image:
         pil_image = pil_image.convert("RGB")
 
     width, height = pil_image.size
-    longest_side = max(width, height)
-    if longest_side > MAX_IMAGE_LONG_SIDE:
-        scale = MAX_IMAGE_LONG_SIDE / longest_side
+    if max_pixels is not None:
+        # Additional references use an area budget, preserving aspect ratio and
+        # leaving smaller images untouched. Floor dimensions to stay <= budget.
+        if width * height > max_pixels:
+            scale = math.sqrt(max_pixels / (width * height))
+            new_width = max(1, math.floor(width * scale))
+            new_height = max(1, math.floor(height * scale))
+            # One-pixel-wide panoramas can exceed the budget after clamping.
+            if new_width * new_height > max_pixels:
+                if new_width >= new_height:
+                    new_width = max_pixels // new_height
+                else:
+                    new_height = max_pixels // new_width
+            pil_image = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    elif max(width, height) > MAX_IMAGE_LONG_SIDE:
+        scale = MAX_IMAGE_LONG_SIDE / max(width, height)
         pil_image = pil_image.resize(
-            (round(width * scale), round(height * scale)),
+            (max(1, round(width * scale)), max(1, round(height * scale))),
             Image.Resampling.LANCZOS,
         )
 
     return pil_image
 
 
-def _image_to_png_bytes(image: Any) -> bytes:
-    pil_image = _image_to_pil(image)
+def _image_to_png_bytes(image: Any, max_pixels: int | None = None) -> bytes:
+    pil_image = _image_to_pil(image, max_pixels)
     buffer = io.BytesIO()
     pil_image.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
-def _image_to_data_url(image: Any) -> str:
-    encoded = base64.b64encode(_image_to_png_bytes(image)).decode("ascii")
+def _image_to_data_url(image: Any, max_pixels: int | None = None) -> str:
+    encoded = base64.b64encode(_image_to_png_bytes(image, max_pixels)).decode("ascii")
     return f"data:image/png;base64,{encoded}"
 
 
@@ -527,6 +592,8 @@ def _build_input_fingerprint(
     input_prompt: str,
     image: Any | None,
     model: str = "",
+    image_2: Any | None = None,
+    image_3: Any | None = None,
 ) -> str:
     if image is None:
         image_hash = "no-image"
@@ -539,18 +606,41 @@ def _build_input_fingerprint(
         "image_sha256": image_hash,
         "model": model,
     }
+    if image_2 is not None or image_3 is not None:
+        payload["extra_images_sha256"] = [
+            hashlib.sha256(_image_to_png_bytes(extra, MAX_EXTRA_IMAGE_PIXELS)).hexdigest()
+            if extra is not None else "no-image"
+            for extra in (image_2, image_3)
+        ]
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
-def _build_user_content(input_prompt: str, image: Any | None) -> str | list[dict[str, Any]]:
-    if image is None:
+def _build_user_content(
+    input_prompt: str,
+    image: Any | None,
+    image_2: Any | None = None,
+    image_3: Any | None = None,
+) -> str | list[dict[str, Any]]:
+    if image is None and image_2 is None and image_3 is None:
         return input_prompt
 
-    return [
-        {"type": "text", "text": input_prompt},
-        {"type": "image_url", "image_url": {"url": _image_to_data_url(image)}},
-    ]
+    content = [{"type": "text", "text": input_prompt}]
+    ordinal = 0
+    for name, reference, limit in (
+        ("image", image, None),
+        ("image_2", image_2, MAX_EXTRA_IMAGE_PIXELS),
+        ("image_3", image_3, MAX_EXTRA_IMAGE_PIXELS),
+    ):
+        if reference is None:
+            continue
+        ordinal += 1
+        # Preserve the original single-image request exactly. With extra inputs,
+        # explicitly identify attachment order, including when sockets are empty.
+        if image_2 is not None or image_3 is not None:
+            content.append({"type": "text", "text": f"Reference image {ordinal} (from {name} input):"})
+        content.append({"type": "image_url", "image_url": {"url": _image_to_data_url(reference, limit)}})
+    return content
 
 
 def _load_lmstudio_model(base_url: str, model: str, api_token: str) -> str:
@@ -722,10 +812,10 @@ class A5lmstudio_prompt_enhancer:
                 "api_token": (
                     "STRING",
                     {
-                        "default": MASKED_API_TOKEN if _load_saved_api_token() else "",
+                        "default": "",
                         "multiline": False,
                         "password": True,
-                        "tooltip": "Only needed when LMStudio/Server is set to require it",
+                        "tooltip": "Saved only for this server address. Confirm old tokens with the token-status button. Leave blank for servers without authentication.",
                     },
                 ),
                 "max_tokens": (
@@ -740,7 +830,9 @@ class A5lmstudio_prompt_enhancer:
                 ),
             },
             "optional": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "First reference; keeps the existing 3072-pixel longest-side limit. Uses the first image of a batch."}),
+                "image_2": ("IMAGE", {"tooltip": "Second reference; downscaled to at most 1 megapixel, without upscaling. Uses the first image of a batch."}),
+                "image_3": ("IMAGE", {"tooltip": "Third reference; downscaled to at most 1 megapixel, without upscaling. Uses the first image of a batch."}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -772,6 +864,8 @@ class A5lmstudio_prompt_enhancer:
         api_token: str = "",
         image: Any | None = None,
         unique_id: Any | None = None,
+        image_2: Any | None = None,
+        image_3: Any | None = None,
     ):
         manual_prompt = last_generated_prompt.strip()
         cached_prompt = _load_last_enhanced_prompt()
@@ -784,9 +878,9 @@ class A5lmstudio_prompt_enhancer:
         base_url = _normalize_server_url(server_url)
         api_token = api_token.strip()
         if api_token and api_token != MASKED_API_TOKEN:
-            _save_api_token(api_token)
+            _save_api_token(api_token, base_url)
         else:
-            api_token = _load_saved_api_token()
+            api_token = _load_saved_api_token(base_url)
 
         model = _model_value_from_label(model, base_url, api_token)
 
@@ -795,6 +889,8 @@ class A5lmstudio_prompt_enhancer:
             input_prompt,
             image,
             model,
+            image_2,
+            image_3,
         )
         if run_mode == RUN_MODE_AUTO and input_fingerprint == _load_last_input_fingerprint():
             result = manual_prompt or cached_prompt
@@ -817,7 +913,7 @@ class A5lmstudio_prompt_enhancer:
         payload: dict[str, Any] = {
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": _build_user_content(input_prompt, image)},
+                {"role": "user", "content": _build_user_content(input_prompt, image, image_2, image_3)},
             ],
             "max_tokens": max_tokens,
             "stream": False,
@@ -872,25 +968,31 @@ def _register_api_routes() -> None:
 
     @PromptServer.instance.routes.post("/a5lmstudio_prompt_enhancer/api_token")
     async def save_api_token(request):
-        data = await request.json()
-        api_token = data.get("api_token")
-        if not isinstance(api_token, str):
-            return web.json_response({"ok": False}, status=400)
-
-        api_token = api_token.strip()
-        if not api_token or api_token == MASKED_API_TOKEN:
-            return web.json_response({"ok": False}, status=400)
-
-        _save_api_token(api_token)
+        try:
+            data = await request.json()
+            if not isinstance(data, dict) or not isinstance(data.get("server_url"), str) or not data["server_url"].strip():
+                raise ValueError("Choose the server address before saving a token.")
+            if data.get("confirm_legacy") is True:
+                _bind_legacy_api_token(data["server_url"])
+            elif isinstance(data.get("api_token"), str):
+                _save_api_token(data["api_token"], data["server_url"])
+            else:
+                raise ValueError("Enter a token for this server.")
+        except (ValueError, OSError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
         return web.json_response({"ok": True})
 
     @PromptServer.instance.routes.get("/a5lmstudio_prompt_enhancer/config")
     async def get_config(request):
+        try:
+            status = _credential_status(request.query.get("server_url") or DEFAULT_SERVER_URL)
+        except (ValueError, OSError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
         recent_models = _load_recent_models()
         choices = _combine_model_choices(recent_models, [])
         return web.json_response(
             {
-                "has_api_token": bool(_load_saved_api_token()),
+                **status,
                 "api_token_placeholder": MASKED_API_TOKEN,
                 "recent_models": recent_models,
                 "default_model": recent_models[0] if recent_models else "",
@@ -916,7 +1018,7 @@ def _register_api_routes() -> None:
                 _unload_lmstudio_models,
                 server_url,
                 "",
-                _load_saved_api_token(),
+                _load_saved_api_token(server_url),
             )
         except Exception as exc:
             return web.json_response(
@@ -934,7 +1036,7 @@ def _register_api_routes() -> None:
         error_message = ""
 
         try:
-            server_models = _server_models(server_url, _load_saved_api_token())
+            server_models = _server_models(server_url, _load_saved_api_token(server_url))
         except Exception as exc:
             error_message = str(exc)
 

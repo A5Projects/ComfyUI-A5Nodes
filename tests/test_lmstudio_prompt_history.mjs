@@ -69,6 +69,11 @@ export {
   promptEditors,
   patchLastPromptWidget,
   navigatePromptHistory,
+  saveApiToken,
+  refreshTokenStatus,
+  patchServerUrlRefresh,
+  maskTokenWidget,
+  ensureReferenceInputs,
 };
 `;
 
@@ -712,3 +717,111 @@ assert.deepEqual(historyModule.getPromptHistory(isolatedNode).entries, ["separat
 for (const timer of executingNode.__a5PromptEditorBindTimers ?? []) clearTimeout(timer);
 
 console.log("LM Studio prompt history tests passed");
+
+// Credential UI checks reuse the extension harness, and run in the existing CI suite.
+const tokenNode = {
+  widgets: [{name: "server_url", value: "http://localhost:1234"}, {name: "api_token", value: ""}],
+  addWidget(type, name, value, callback, options) {
+    const widget = {type, name, value, callback, options};
+    this.widgets.push(widget);
+    return widget;
+  },
+};
+const serverField = tokenNode.widgets[0];
+const tokenField = tokenNode.widgets[1];
+const editorButton = tokenNode.addWidget("button", "Edit last prompt...", null, () => {}, {serialize: false});
+const requests = [];
+globalThis.fetch = async (url, options) => {
+  requests.push({url, options});
+  return {ok: true, json: async () => ({has_api_token: true, server_key: "http://localhost:1234/v1"})};
+};
+await historyModule.saveApiToken("test-secret", serverField.value);
+assert.deepEqual(JSON.parse(requests.pop().options.body), {
+  api_token: "test-secret", server_url: "http://localhost:1234", confirm_legacy: false,
+});
+await historyModule.refreshTokenStatus(tokenNode);
+assert.equal(tokenField.value, "XXXXXXXX");
+assert.equal(tokenNode.__a5TokenStatusButton.name, "Token saved for this server");
+assert.equal(tokenNode.__a5TokenStatusButton.serialize, false);
+assert.equal(tokenNode.widgets[tokenNode.widgets.indexOf(serverField) + 1], tokenNode.__a5TokenStatusButton);
+assert.equal(tokenNode.widgets.at(-1), editorButton, "text editor remains the lowest button");
+assert.match(requests.at(-1).url, /server_url=http%3A%2F%2Flocalhost%3A1234/);
+
+globalThis.fetch = async () => ({ok: true, json: async () => ({has_api_token: false})});
+historyModule.patchServerUrlRefresh(tokenNode);
+serverField.value = "http://other.example:1234";
+serverField.callback(serverField.value);
+assert.equal(tokenField.value, "", "changing server immediately clears the token marker");
+await historyModule.refreshTokenStatus(tokenNode);
+assert.equal(tokenNode.__a5TokenStatusButton.name, "No token saved for this server");
+// A restored/reordered widget list is repaired without duplicating the button.
+const statusButton = tokenNode.__a5TokenStatusButton;
+tokenNode.widgets.splice(tokenNode.widgets.indexOf(statusButton), 1);
+tokenNode.widgets.push(statusButton);
+await historyModule.refreshTokenStatus(tokenNode);
+assert.equal(tokenNode.widgets[1], statusButton);
+assert.equal(tokenNode.widgets.at(-1), editorButton);
+assert.equal(tokenNode.widgets.filter(widget => widget === statusButton).length, 1);
+
+let finishOldRequest;
+globalThis.fetch = () => new Promise(resolve => {finishOldRequest = resolve;});
+const oldStatus = historyModule.refreshTokenStatus(tokenNode);
+serverField.value = "http://localhost:1234";
+globalThis.fetch = async () => ({ok: true, json: async () => ({has_api_token: true})});
+await historyModule.refreshTokenStatus(tokenNode);
+finishOldRequest({ok: true, json: async () => ({has_api_token: false})});
+await oldStatus;
+assert.equal(tokenField.value, "XXXXXXXX", "stale status cannot overwrite the current server");
+
+let confirmations = 0;
+let legacyPosts = 0;
+globalThis.window.confirm = text => { confirmations++; assert.match(text, /localhost:1234\/v1/); return false; };
+globalThis.fetch = async (url, options) => {
+  if (options?.method === "POST") {
+    legacyPosts++;
+    assert.deepEqual(JSON.parse(options.body), {api_token: "", server_url: "http://localhost:1234", confirm_legacy: true});
+  }
+  return {ok: true, json: async () => ({has_api_token: false, legacy_token_pending: true, server_key: "http://localhost:1234/v1"})};
+};
+await historyModule.refreshTokenStatus(tokenNode);
+assert.equal(legacyPosts, 0, "loading a workflow must not bind an old token");
+await tokenNode.__a5TokenStatusButton.callback();
+assert.equal(confirmations, 1);
+assert.equal(legacyPosts, 0, "cancelled confirmation must not bind a token");
+globalThis.window.confirm = () => true;
+await tokenNode.__a5TokenStatusButton.callback();
+assert.equal(legacyPosts, 1);
+
+let submittedToken;
+globalThis.fetch = async (url, options) => {
+  if (options?.method === "POST") submittedToken = JSON.parse(options.body);
+  return {ok: true, json: async () => ({has_api_token: true})};
+};
+historyModule.maskTokenWidget(tokenNode);
+tokenField.callback("new-secret");
+assert.equal(tokenField.value, "XXXXXXXX");
+assert.equal(tokenField.serializeValue(), "XXXXXXXX");
+assert.equal(submittedToken.server_url, "http://localhost:1234");
+assert.equal(submittedToken.api_token, "new-secret");
+await new Promise(resolve => setTimeout(resolve, 0));
+globalThis.fetch = async () => ({ok: false});
+tokenField.callback("retry-secret");
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal(tokenField.value, "");
+assert.match(tokenNode.__a5TokenStatusButton.name, /not saved/);
+console.log("LM Studio server-bound token UI tests passed");
+
+const oldImageInput = {name: "image", type: "IMAGE", link: 77};
+const migratedNode = {
+  inputs: [oldImageInput],
+  addInput(name, type) { this.inputs.push({name, type, link: null}); },
+};
+historyModule.ensureReferenceInputs(migratedNode);
+assert.deepEqual(migratedNode.inputs.map(input => input.name), ["image", "image_2", "image_3"]);
+assert.equal(migratedNode.inputs[0], oldImageInput);
+assert.equal(migratedNode.inputs[0].link, 77);
+migratedNode.inputs[1].link = 88;
+historyModule.ensureReferenceInputs(migratedNode);
+assert.equal(migratedNode.inputs.length, 3, "reconfiguration does not duplicate reference sockets");
+assert.equal(migratedNode.inputs[1].link, 88, "existing extra-reference links survive");
+console.log("LM Studio reference-input migration tests passed");

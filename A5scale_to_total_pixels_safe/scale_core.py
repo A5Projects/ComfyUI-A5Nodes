@@ -7,6 +7,15 @@ import comfy.utils
 
 
 UPSCALE_METHODS = ["lanczos", "bicubic", "bilinear", "nearest-exact", "area"]
+PIXELS_PER_MEGAPIXEL = 1024 * 1024
+DEFAULT_MEGAPIXELS = 1.0
+
+
+def megapixels_to_total_pixels(megapixels):
+    value = float(megapixels)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("Megapixels must be a positive, finite number.")
+    return max(1, round(value * PIXELS_PER_MEGAPIXEL))
 
 ASPECT_RATIOS = {
     "1:1 (Square)": (1, 1),

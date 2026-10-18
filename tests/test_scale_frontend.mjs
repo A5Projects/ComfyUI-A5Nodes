@@ -6,10 +6,10 @@ import test from "node:test";
 const source = readFileSync(new URL("../web/a5scale_to_total_pixels_safe.js", import.meta.url), "utf8")
     .replace(/^import .*;\r?$/gm, "");
 const defaults = {
-    target_total_pixels: 786432, dimension_rule: "Multi16", aspect_ratio: "disabled",
+    dimension_rule: "Multi16", aspect_ratio: "disabled",
     scale_policy: "both", upscale_method: "lanczos", width_override: 0, height_override: 0,
     keep_aspect: "on", aspect_handling: "padding", padding_side: "right / bottom",
-    padding_color: "#808080",
+    padding_color: "#808080", megapixels: 1,
 };
 
 function harness() {
@@ -20,6 +20,7 @@ function harness() {
     const context = vm.createContext({
         app: { registerExtension(value) { extension = value; } },
         api: { addEventListener(name, callback) { events.set(name, callback); } },
+        setWidgetConfig() {},
         console,
     });
     vm.runInContext(source, context);
@@ -29,8 +30,10 @@ function harness() {
             this.mode = 0;
             this.graph = graph;
             this.size = [320, 400];
-            this.inputs = [{ name: "image", type: "IMAGE", link: null }];
-            this.outputs = ["image", "width", "height", "size_text", "latent"].map((name, i) => ({
+            this.properties = {};
+            this.inputs = [{ name: "image", type: "IMAGE", link: null },
+                { name: "target_total_pixels", type: "INT", link: null }];
+            this.outputs = ["image", "width", "height", "size_text", "Empty Latent"].map((name, i) => ({
                 name, type: ["IMAGE", "INT", "INT", "STRING", "LATENT"][i], links: null,
             }));
             this.widgets = Object.entries(defaults).map(([name, value]) => ({ name, value, options: {} }));
@@ -38,6 +41,7 @@ function harness() {
             this.onNodeCreated();
         }
         addOutput(name, type) { this.outputs.push({ name, type, links: null }); }
+        removeInput(index) { this.inputs.splice(index, 1); }
         addCustomWidget(widget) { this.widgets.push(widget); }
         addWidget(type, name, value, callback, options) {
             const widget = { type, name, value, callback, options };
@@ -50,9 +54,14 @@ function harness() {
         configure(config) {
             if (config.outputs) this.outputs = structuredClone(config.outputs);
             if (config.inputs) this.inputs = structuredClone(config.inputs);
+            Object.assign(this.properties, config.properties);
             config.widgets_values?.forEach((value, index) => {
                 if (this.widgets[index]) this.widgets[index].value = value;
             });
+            for (const [name, value] of Object.entries(config.widgets_values_named ?? {})) {
+                const widget = this.widgets.find((item) => item.name === name);
+                if (widget) widget.value = value;
+            }
         }
     }
     extension.beforeRegisterNodeDef(Node, { name: "A5scale_to_total_pixels_safe" });
@@ -80,14 +89,14 @@ test("blank mode enables its color picker, including saved stretch", () => {
     const { set, widget } = harness();
     set("width_override", 1025);
     set("aspect_handling", "stretch img");
-    assert.equal(widget("target_total_pixels").disabled, false);
+    assert.equal(widget("megapixels").disabled, false);
     for (const name of ["dimension_rule", "keep_aspect", "scale_policy", "upscale_method", "aspect_handling", "padding_side"]) {
         assert.equal(widget(name).disabled, true, name);
     }
     assert.equal(widget("padding_color").disabled, false);
     assert.equal(widget("pick_padding_color").disabled, false);
     set("aspect_ratio", "16:9 (Widescreen)");
-    assert.equal(widget("target_total_pixels").disabled, true);
+    assert.equal(widget("megapixels").disabled, true);
     assert.equal(widget("aspect_ratio").disabled, false);
     set("height_override", 577);
     assert.equal(widget("aspect_ratio").disabled, true);
@@ -96,7 +105,7 @@ test("blank mode enables its color picker, including saved stretch", () => {
 test("preset-only blank generation keeps automatic size settings", () => {
     const { set, widget } = harness();
     set("aspect_ratio", "1:1 (Square)");
-    assert.equal(widget("target_total_pixels").disabled, false);
+    assert.equal(widget("megapixels").disabled, false);
     assert.equal(widget("dimension_rule").disabled, false);
     assert.equal(widget("scale_policy").disabled, true);
 });
@@ -108,7 +117,7 @@ test("live image restores original control states", () => {
     assert.equal(widget("scale_policy").disabled, false);
     assert.equal(widget("keep_aspect").disabled, false);
     set("width_override", 1025);
-    assert.equal(widget("target_total_pixels").disabled, true);
+    assert.equal(widget("megapixels").disabled, true);
     assert.equal(widget("padding_color").disabled, true);
     set("keep_aspect", "off");
     assert.equal(widget("padding_color").disabled, false);
@@ -121,7 +130,7 @@ test("bypassed load image and bypass chains resolve without an image", () => {
     set("width_override", 100);
     loader.mode = 4;
     changed();
-    assert.equal(widget("target_total_pixels").disabled, false);
+    assert.equal(widget("megapixels").disabled, false);
     assert.equal(widget("padding_color").disabled, false);
     const bypass = { id: 3, mode: 4, graph, inputs: [{ name: "image", type: "IMAGE", link: 20 }], outputs: [{ type: "IMAGE" }] };
     nodes.set(2, loader);
@@ -131,10 +140,10 @@ test("bypassed load image and bypass chains resolve without an image", () => {
     loader.mode = 0;
     changed();
     assert.equal(widget("upscale_method").disabled, false);
-    assert.equal(widget("target_total_pixels").disabled, true);
+    assert.equal(widget("megapixels").disabled, true);
     node.inputs[0].link = null;
     node.onConnectionsChange();
-    assert.equal(widget("target_total_pixels").disabled, false);
+    assert.equal(widget("megapixels").disabled, false);
 });
 
 test("execution and cached execution restore authoritative labels", () => {
@@ -144,16 +153,16 @@ test("execution and cached execution restore authoritative labels", () => {
     node.onExecuted(message(true));
     assert.equal(node.outputs[0].label, "image (blank: no input)");
     assert.equal(node.outputs[1].label, "1026 width");
-    assert.equal(node.outputs[4].label, "1032x584 latent");
-    assert.equal(widget("target_total_pixels").disabled, false);
+    assert.equal(node.outputs[4].label, "1032x584 Empty Latent");
+    assert.equal(widget("megapixels").disabled, false);
     set("padding_color", "#00ff00");
     assert.equal(node.outputs[0].label, "image");
-    assert.equal(node.outputs[4].label, "latent");
+    assert.equal(node.outputs[4].label, "Empty Latent");
     node.onExecuted(message(true));
     assert.equal(node.outputs[0].label, "image (blank: no input)");
     node.onExecuted(message(false));
     assert.equal(node.outputs[0].label, "image");
-    assert.equal(widget("target_total_pixels").disabled, true);
+    assert.equal(widget("megapixels").disabled, true);
 });
 
 test("upstream changes clear stale labels but unrelated changes retain them", () => {
@@ -185,12 +194,15 @@ test("old workflows append latent without moving existing output links", () => {
     assert.equal(widget("aspect_handling").value, "stretch img");
     assert.equal(widget("dimension_rule").value, "Multi32");
     assert.equal(widget("padding_color").value, "#010203");
+    assert.equal(widget("megapixels").value, 0.75);
     const saved = { ...config, outputs: structuredClone(node.outputs),
+        properties: structuredClone(node.properties),
         widgets_values: node.widgets.filter((item) => item.serialize !== false).map((item) => item.value) };
     node.configure(saved);
     assert.equal(node.outputs.length, 5);
     assert.equal(widget("padding_color").value, "#010203");
     assert.equal(widget("aspect_handling").value, "stretch img");
+    assert.equal(widget("megapixels").value, 0.75);
 });
 
 test("legacy 7, 8 and 12 widget layouts still migrate", () => {
@@ -208,7 +220,75 @@ test("legacy 7, 8 and 12 widget layouts still migrate", () => {
         assert.equal(widget("width_override").value, 1024);
         assert.equal(widget("height_override").value, 768);
         assert.equal(node.outputs.length, 5);
+        assert.equal(widget("megapixels").value, 0.75);
     }
+});
+
+test("megapixels is the first widget and new nodes have no legacy socket", () => {
+    const { node } = harness();
+    assert.equal(node.widgets[0].name, "megapixels");
+    assert.equal(node.widgets[0].value, 1);
+    assert.equal(node.widgets[0].options.precision, 3);
+    assert.equal(node.widgets[0].options.round, false);
+    assert.equal(node.properties.a5_size_unit, "megapixels");
+    assert.deepEqual(node.inputs.map((input) => input.name), ["image"]);
+});
+
+test("old latent name migrates in place with all output links preserved", () => {
+    const { node } = harness();
+    const outputs = node.outputs.map((output, index) => ({ ...output, links: [index + 10] }));
+    outputs[4].name = "latent";
+    outputs[4].label = "1032x584 latent";
+    node.configure({ outputs });
+    assert.equal(node.outputs.length, 5);
+    assert.equal(node.outputs[4].name, "Empty Latent");
+    assert.equal(node.outputs[4].label, "Empty Latent");
+    outputs.forEach((output, index) => assert.deepEqual(node.outputs[index].links, output.links));
+});
+
+test("pixel targets migrate exactly and save/reload never converts them twice", () => {
+    for (const pixels of [4096, 400000, 786432, 2000000, 2000001, 268435456]) {
+        const { node, widget } = harness();
+        node.configure({ properties: { unrelated: true },
+            widgets_values: [pixels, "Multi16", "both", "lanczos", 0, 0, "on"] });
+        assert.equal(widget("megapixels").value * 1024 * 1024, pixels);
+        const saved = { properties: structuredClone(node.properties),
+            widgets_values: node.widgets.filter((item) => item.serialize !== false).map((item) => item.value) };
+        node.configure(saved);
+        node.configure(saved);
+        assert.equal(widget("megapixels").value * 1024 * 1024, pixels);
+        assert.equal(node.properties.unrelated, true);
+    }
+});
+
+test("named widget values migrate from pixels and retain existing megapixels", () => {
+    const { node, widget } = harness();
+    node.configure({ widgets_values_named: { target_total_pixels: 2000000, padding_color: "#123456" } });
+    assert.equal(widget("megapixels").value, 2000000 / (1024 * 1024));
+    assert.equal(widget("padding_color").value, "#123456");
+    node.configure({ widgets_values_named: { megapixels: 0.4 } });
+    assert.equal(widget("megapixels").value, 0.4);
+});
+
+test("legacy connected INT input remains in pixels and takes precedence", () => {
+    const { node, widget } = harness();
+    node.configure({
+        inputs: [{ name: "image", type: "IMAGE", link: null },
+            { name: "target_total_pixels", type: "INT", link: 42, widget: { name: "target_total_pixels" } }],
+        widgets_values: [2000000, "Multi16", "both", "lanczos", 0, 0, "on"],
+    });
+    assert.equal(node.inputs[1].link, 42);
+    assert.equal(node.inputs[1].name, "target_total_pixels");
+    assert.equal(node.inputs[1].type, "INT");
+    assert.equal(node.inputs[1].widget.name, "target_total_pixels");
+    assert.equal(widget("target_total_pixels").hidden, true);
+    assert.equal(widget("target_total_pixels").serialize, false);
+    assert.equal(widget("target_total_pixels").serializeValue(), 2000000);
+    assert.equal(widget("megapixels").disabled, true);
+    node.inputs[1].link = null;
+    node.onConnectionsChange();
+    assert.equal(widget("megapixels").disabled, false);
+    assert.equal(widget("target_total_pixels").serializeValue(), undefined);
 });
 
 test("removed nodes are no longer tracked", () => {

@@ -210,8 +210,8 @@ function createEditor(node, inputName, inputData) {
             }
             if (!removed && loaded.length) {
                 revision = Date.now();
-                // Keep a multi-file drop non-destructive even if only one upload succeeds.
-                commit(placeFiles(state, loaded, target, images.length > 1));
+                // Place successful uploads in order, starting at the chosen slot.
+                commit(placeFiles(state, loaded, target));
             }
             if (!removed) message(errors.length ? errors.join("; ") : "", errors.length > 0);
         }).catch(error => { if (!removed) message(error.message, true); }).finally(() => {

@@ -13,5 +13,5 @@ NODE_CLASS_MAPPINGS = {
     "A5scale_to_total_pixels_safe": A5ScaleToTotalPixelsSafe,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "A5scale_to_total_pixels_safe": "A5scale_to_total_pixels_safe",
+    "A5scale_to_total_pixels_safe": "A5Scale_Pad_to_total_pixels",
 }
