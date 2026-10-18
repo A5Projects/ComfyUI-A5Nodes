@@ -103,7 +103,7 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          python -m pip install pillow typing_extensions pyyaml
+          python -m pip install pillow typing_extensions pyyaml numpy
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Compile Python sources

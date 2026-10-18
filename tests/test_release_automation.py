@@ -91,6 +91,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
             ("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.13"), ("windows-latest", "3.13"),
         })
 
+    def test_clean_python_runners_install_image_test_dependencies(self):
+        steps = self.tests["jobs"]["python-tests"]["steps"]
+        install = next(step["run"] for step in steps
+                       if step.get("name") == "Install test dependencies")
+        packages = re.findall(r"python -m pip install ([^\n]+)", install)
+        explicit = {package for command in packages for package in command.split()}
+        # Torch does not install NumPy; image tests need it explicitly on CI.
+        self.assertTrue({"pillow", "typing_extensions", "pyyaml", "numpy", "torch"} <= explicit)
+
     def test_publish_gate_rejects_failure_cancel_skip_and_missing_output(self):
         guard = self.tests["jobs"]["publish-node"]["if"]
         self.assertNotIn("always()", guard)
