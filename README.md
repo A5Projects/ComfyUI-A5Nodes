@@ -252,7 +252,8 @@ A5 Text Prompt
 A text prompt node. BUT the text inside is shown AND remains editable! A switch to allow or block a external inout overwriting the text currently in your box. Text outputted as string.
 Aim: Not to have to disconnect and copy and paste around if i want to edit what was last sent to this box. 
 stores up to 20 last, saves when one is sent in externally OR you type and then click outside of the node. They are NOT persistent over Comfy retarts and stored per workflow. But can be exported.  Connect external stings to the External Input connector, NOT to the textbox.
-<img width="344" height="220" alt="image" src="https://github.com/user-attachments/assets/4d81f115-230a-4a63-8f76-006b49bdbd2c" />
+
+<img width="560" height="280" alt="image" src="https://github.com/user-attachments/assets/61e258d2-808d-47c0-9fdb-9d6d3dda84b7" />
 
 It is basically the simpler, text only, undo capable text editing part of my PromptEnhancer node
 
