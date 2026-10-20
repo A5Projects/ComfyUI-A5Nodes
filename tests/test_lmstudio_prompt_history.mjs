@@ -737,7 +737,7 @@ globalThis.fetch = async (url, options) => {
 };
 await historyModule.saveApiToken("test-secret", serverField.value);
 assert.deepEqual(JSON.parse(requests.pop().options.body), {
-  api_token: "test-secret", server_url: "http://localhost:1234", confirm_legacy: false,
+  api_token: "test-secret", server_url: "http://localhost:1234",
 });
 await historyModule.refreshTokenStatus(tokenNode);
 assert.equal(tokenField.value, "XXXXXXXX");
@@ -775,22 +775,20 @@ assert.equal(tokenField.value, "XXXXXXXX", "stale status cannot overwrite the cu
 
 let confirmations = 0;
 let legacyPosts = 0;
-globalThis.window.confirm = text => { confirmations++; assert.match(text, /localhost:1234\/v1/); return false; };
+globalThis.window.confirm = () => { confirmations++; return true; };
 globalThis.fetch = async (url, options) => {
   if (options?.method === "POST") {
     legacyPosts++;
-    assert.deepEqual(JSON.parse(options.body), {api_token: "", server_url: "http://localhost:1234", confirm_legacy: true});
   }
   return {ok: true, json: async () => ({has_api_token: false, legacy_token_pending: true, server_key: "http://localhost:1234/v1"})};
 };
 await historyModule.refreshTokenStatus(tokenNode);
 assert.equal(legacyPosts, 0, "loading a workflow must not bind an old token");
 await tokenNode.__a5TokenStatusButton.callback();
-assert.equal(confirmations, 1);
-assert.equal(legacyPosts, 0, "cancelled confirmation must not bind a token");
-globalThis.window.confirm = () => true;
-await tokenNode.__a5TokenStatusButton.callback();
-assert.equal(legacyPosts, 1);
+assert.equal(confirmations, 0, "legacy confirmation is gone, even with an old backend response");
+assert.equal(legacyPosts, 0, "the status button only refreshes; it cannot bind a token");
+assert.equal(tokenField.value, "");
+assert.equal(tokenNode.__a5TokenStatusButton.name, "No token saved for this server");
 
 let submittedToken;
 globalThis.fetch = async (url, options) => {

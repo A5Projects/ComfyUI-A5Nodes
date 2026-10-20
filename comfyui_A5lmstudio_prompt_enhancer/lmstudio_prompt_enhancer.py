@@ -245,22 +245,24 @@ def _remove_legacy_api_token(config: dict[str, Any]) -> None:
     _save_config(sanitized_config)
 
 
-def _credentials_with_pending_legacy() -> dict[str, Any]:
-    """Move old source-side secrets out of source, but do not assign a server."""
+def _credentials_without_legacy() -> dict[str, Any]:
+    """Discard unbound tokens; a request must never choose their destination.
+
+    Called under _CREDENTIALS_LOCK. Preserve existing server-bound credentials
+    and unrelated settings. Cleanup errors propagate before any network request.
+    """
     credentials = _load_credentials()
-    legacy_config = _load_config()
-    legacy_token = credentials.get("api_token") or legacy_config.get("api_token")
-    if isinstance(legacy_token, str) and legacy_token:
-        credentials["api_token"] = legacy_token
+    if "api_token" in credentials:
+        credentials.pop("api_token")
         _save_credentials(credentials)
-        _remove_legacy_api_token(legacy_config)
+    _remove_legacy_api_token(_load_config())
     return credentials
 
 
 def _load_saved_api_token(server_url: str) -> str:
     key = _normalize_server_url(server_url)
     with _CREDENTIALS_LOCK:
-        tokens = _load_credentials().get("server_tokens", {})
+        tokens = _credentials_without_legacy().get("server_tokens", {})
         token = tokens.get(key) if isinstance(tokens, dict) else None
     return token if isinstance(token, str) else ""
 
@@ -268,9 +270,7 @@ def _load_saved_api_token(server_url: str) -> str:
 def _credential_status(server_url: str) -> dict[str, Any]:
     key = _normalize_server_url(server_url)
     with _CREDENTIALS_LOCK:
-        credentials = _credentials_with_pending_legacy()
-        return {"server_key": key, "has_api_token": bool(_load_saved_api_token(key)),
-                "legacy_token_pending": bool(credentials.get("api_token"))}
+        return {"server_key": key, "has_api_token": bool(_load_saved_api_token(key))}
 
 
 def _save_api_token(api_token: str, server_url: str) -> None:
@@ -279,27 +279,12 @@ def _save_api_token(api_token: str, server_url: str) -> None:
     if not token or token == MASKED_API_TOKEN:
         raise ValueError("Enter a token for this server.")
     with _CREDENTIALS_LOCK:
-        credentials = _credentials_with_pending_legacy()
+        credentials = _credentials_without_legacy()
         tokens = credentials.setdefault("server_tokens", {})
         if not isinstance(tokens, dict):
             raise ValueError("Invalid saved server-token data.")
         tokens[key] = token
         credentials["version"] = 2
-        _save_credentials(credentials)
-
-
-def _bind_legacy_api_token(server_url: str) -> None:
-    key = _normalize_server_url(server_url)
-    with _CREDENTIALS_LOCK:
-        credentials = _credentials_with_pending_legacy()
-        token = credentials.get("api_token")
-        if not isinstance(token, str) or not token:
-            raise ValueError("No old token is waiting for confirmation.")
-        if _load_saved_api_token(key):
-            raise ValueError("This server already has a saved token.")
-        _save_api_token(token, key)
-        credentials = _load_credentials()
-        credentials.pop("api_token", None)
         _save_credentials(credentials)
 
 
@@ -815,7 +800,7 @@ class A5lmstudio_prompt_enhancer:
                         "default": "",
                         "multiline": False,
                         "password": True,
-                        "tooltip": "Saved only for this server address. Confirm old tokens with the token-status button. Leave blank for servers without authentication.",
+                        "tooltip": "Saved only for this server address. Old unassigned tokens must be entered again. Leave blank for servers without authentication.",
                     },
                 ),
                 "max_tokens": (
@@ -972,9 +957,9 @@ def _register_api_routes() -> None:
             data = await request.json()
             if not isinstance(data, dict) or not isinstance(data.get("server_url"), str) or not data["server_url"].strip():
                 raise ValueError("Choose the server address before saving a token.")
-            if data.get("confirm_legacy") is True:
-                _bind_legacy_api_token(data["server_url"])
-            elif isinstance(data.get("api_token"), str):
+            if data.get("confirm_legacy"):
+                raise ValueError("Old token confirmation is no longer supported. Enter the token again for this server.")
+            if isinstance(data.get("api_token"), str):
                 _save_api_token(data["api_token"], data["server_url"])
             else:
                 raise ValueError("Enter a token for this server.")

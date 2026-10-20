@@ -1327,12 +1327,12 @@ function isRealToken(value) {
   return typeof value === "string" && value.length > 0 && value !== MASKED_TOKEN;
 }
 
-async function saveApiToken(apiToken, serverUrl, confirmLegacy = false) {
+async function saveApiToken(apiToken, serverUrl) {
   try {
     const response = await fetch("/a5lmstudio_prompt_enhancer/api_token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_token: apiToken, server_url: serverUrl, confirm_legacy: confirmLegacy }),
+      body: JSON.stringify({ api_token: apiToken, server_url: serverUrl }),
     });
     return response.ok;
   } catch (error) {
@@ -1577,19 +1577,6 @@ function setupTokenStatus(node) {
   }
   if (!node.addWidget) return;
   const button = node.addWidget("button", "Checking saved token…", null, async () => {
-    const serverUrl = currentServerUrl(node);
-    const config = await loadSavedConfig(serverUrl);
-    if (!config || currentServerUrl(node) !== serverUrl) return;
-    if (!config.has_api_token && config.legacy_token_pending) {
-      if (!window.confirm(`Use your previously saved token ONLY for this server?\n\n${config.server_key}\n\nConfirm only if this is the server that issued the token.`)) return;
-      if (currentServerUrl(node) !== serverUrl) return;
-      const ok = await saveApiToken("", serverUrl, true);
-      if (!ok) {
-        setTokenStatusLabel(node, "Could not confirm token — click to retry");
-        return;
-      }
-      updateAllModelDropdowns();
-    }
     await refreshTokenStatus(node);
   }, { serialize: false });
   button.serialize = false;
@@ -1620,7 +1607,6 @@ async function refreshTokenStatus(node) {
   const widget = findWidget(node, "api_token");
   if (widget && !isRealToken(widget.value)) widget.value = config.has_api_token ? MASKED_TOKEN : "";
   setTokenStatusLabel(node, config.has_api_token ? "Token saved for this server"
-    : config.legacy_token_pending ? "Confirm old token for this server…"
     : "No token saved for this server");
 }
 

@@ -7,13 +7,28 @@ outpainting utilities.
 Existing A5 node IDs are preserved so workflows created with the standalone
 versions remain compatible.
 
+## Changes in 0.1.5
+
+- Security fix: removed the old, unassigned API-token confirmation path. An API
+  caller can no longer bind a stored legacy token to a server of their choice.
+- Legacy `api_token` fields are discarded from the old source-side settings and
+  user credentials when credentials are accessed. Other settings and existing
+  server-bound tokens are preserved. If your token was still unassigned, enter
+  it once again in the API token field for the intended server.
+- The token-status button now only refreshes status. Restart ComfyUI and refresh
+  the browser after updating to replace both the backend and the old UI.
+
+If untrusted users could access your ComfyUI API while an unassigned token was
+stored, consider revoking/replacing that token at its issuing server. Removing
+a local saved copy does not revoke the token.
+
 ## Changes in 0.1.4
 
 - LM Studio Prompt Enhancer accepts up to three ordered reference images.
   The first retains its existing resolution limit; references 2 and 3 are
   downscaled to at most 1,000,000 pixels each. Auto bypass checks all references.
-- Saved server tokens are now bound to their server address. Older unassigned
-  tokens require explicit confirmation before use. Token status sits below the
+- Saved server tokens are now bound to their server address. The original
+  legacy-token confirmation was replaced by re-entry in 0.1.5. Token status sits below the
   server address, leaving **Edit last prompt** as the lowest button.
 - Scale/padding now displays as **A5Scale_Pad_to_total_pixels**, uses a compact
   megapixel control, and labels its latent output **Empty Latent**. Existing
@@ -192,7 +207,7 @@ The LM Studio enhancer accepts up to three optional references: `image`, `image_
 - NON LM Studio server: This should work with any openai compatible server, but it was made and tested using LM; Studio. Especially the model loading/unloading may not work with other servers.
 - Also keep in mind this was made for local use with a local llm, on a single computer. So it deliberately balances convenience and complexity with safety. The server token is never displayed in the node (XXX) BUT is saved in plain text in that json file. 
 
-Tokens are now saved separately for each server in `ComfyUI/user/A5-Nodes/lmstudio_credentials.json` (or your configured ComfyUI user directory), not in the workflow or node source. `http://localhost:1234`, the same address with `/v1`, and a trailing slash share a token. A different hostname, port, HTTP/HTTPS scheme, or custom API base path does not. Switching back remembers that server's token; a server without authentication still needs no token. The status button shows whether this server has a token. For an older, unassigned token, click **Confirm old token for this server…** and verify the displayed address before confirming. New installations simply enter a token in the existing field. HTTP redirects are refused; enter the final server URL explicitly. This does not replace access control for a shared or publicly exposed ComfyUI server.
+Tokens are saved separately for each server in `ComfyUI/user/A5-Nodes/lmstudio_credentials.json` (or your configured ComfyUI user directory), not in the workflow or node source. `http://localhost:1234`, the same address with `/v1`, and a trailing slash share a token. A different hostname, port, HTTP/HTTPS scheme, or custom API base path does not. Switching back remembers that server's token; a server without authentication still needs no token. The status button only shows/refreshes whether this server has a token. Older unassigned tokens are discarded, not migrated: enter your token once again in the existing API token field for the intended server. Already server-bound tokens are kept. HTTP redirects are refused; enter the final server URL explicitly. This does not replace access control for a shared or publicly exposed ComfyUI server.
 
 ## Prompt Database Node:
 Save multiple prompts (or whatever) with names, in three different categories (three separate sets of saved prompts). It's stored in the node's folder, in json file. so all saved prompts are available in any workflow in your comfy installation. Should be simple to understand.
