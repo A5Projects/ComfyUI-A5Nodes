@@ -40,8 +40,9 @@ a local saved copy does not revoke the token.
 
 Restart ComfyUI and refresh the browser after updating so the Python backend
 and frontend load the same version. The Manager default-channel catalogue
-[registration request](https://github.com/Comfy-Org/ComfyUI-Manager/pull/3391)
-is separate from this registry release and is still awaiting approval.
+[registration](https://github.com/Comfy-Org/ComfyUI-Manager/pull/3391)
+was merged on 27 October 2026. This catalogue registration is separate from
+individual version releases in the Comfy Registry.
 
 ## Changes in 0.1.3
 
@@ -126,11 +127,19 @@ Qwen/H3 model generation is not part of these checks.
 
 ## Installation
 
-Clone or extract this repository into `ComfyUI/custom_nodes`, then restart
-ComfyUI and refresh the browser. Disable any standalone copies of these nodes
-to avoid duplicate registrations.
-Now also on github and in ComfyUI manager 
-## When installig via Comfy Manager, don't use the Nightly version, but select the numbered one
+In ComfyUI Manager, search for **A5 Custom Nodes** (`a5-nodes`) and install the
+latest numbered registry release. The pack is now included in Manager's
+default-channel catalogue. If it does not appear, refresh Manager's catalogue
+and make sure Manager is up to date; cached listings may take time to refresh.
+There is no need to lower security settings to install the numbered release.
+
+For normal use, choose **latest** or a numbered version rather than **Nightly**.
+Nightly installs the current GitHub development code, not a copy of the latest
+numbered registry release.
+
+Alternatively, clone or extract this repository into `ComfyUI/custom_nodes`.
+After installing or updating, restart ComfyUI and refresh the browser. Disable
+any standalone copies of these nodes to avoid duplicate registrations.
 
 ### No additional Python packages are required. Detailed node documentation and screenshots below.
 
