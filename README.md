@@ -9,6 +9,10 @@ versions remain compatible.
 
 ## Changes in 0.1.5
 
+Personal note: In order to get the node pack merged  into ComfyUI Manager natively, which is now done, it was necessary to remove the convenient but vulnerable automatic transfer of a previously set server auth token. So if set in a older version, you will have to re-enter your llm token with this version once (per server). The token will be saved for THAT server from then on. Each server has now it's own token assigned. 
+Btw:  the requirement for a token for this level of access comes from LM Studio itself. Your mileage with other localhost server providers/tools may vary.    
+The functionality of using the default loaded llm still does not require a token.  
+
 - Security fix: removed the old, unassigned API-token confirmation path. An API
   caller can no longer bind a stored legacy token to a server of their choice.
 - Legacy `api_token` fields are discarded from the old source-side settings and
